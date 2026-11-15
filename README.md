@@ -6,10 +6,19 @@
 
 ## 兼容与安装
 
+推荐添加自建插件来源，启用后刷新发现页并安装「社群中心」。
+
+- 名称：社群中心 · kiroo92
+- 来源 URL：`https://github.com/kiroo92/tr-plugin-community/releases/latest/download/index.json`
+- Ed25519 公钥：`JRev1ZHQseQAwkPpVLlVoxR4E3FuZtU8GCVLxv3ZG4U=`
+- 发布页：https://github.com/kiroo92/tr-plugin-community/releases
+
+索引附带独立的 index.json.sig；安装包使用固定版本下载地址并校验 SHA256。发布时先上传完整草稿、下载核对后公开；同版本资产不替换，更新应递增插件版本。
+
 - 目标是 kiroo92/TokenRouter-plugin-data 分发的 TokenRouter v0.7.3 及以上；其它分发的相同版本号不代表支持 DataDir。
 - Go import 保留 github.com/TokenFlux/TokenRouter/plugin-sdk/go，go.mod require v0.2.1，通过版本化 replace 选择 github.com/kiroo92/TokenRouter-plugin-data/plugin-sdk/go v0.3.0。使用 go list -m -json github.com/TokenFlux/TokenRouter/plugin-sdk/go 核对 Replace；go.sum 一同保留。
 - Web SDK 固定 0.2.0，不因 DataDir 升级。打包工具统一为 go tool trplugin，不使用另一个带旧版本号的 go run。
-- 从 release 中选择宿主平台对应的 tar.gz，通过宿主本地安装入口安装。此项目不自动部署、不上传官方市场、不包含分发签名索引。
+- 也可从 GitHub Release 中选择宿主平台对应的 tar.gz，通过宿主本地安装入口安装。此项目不自动部署、不上传官方市场。
 - 接受 user.read、user.identities、payment.read、catalog.read 权限。
 
 ## 设置与运行
