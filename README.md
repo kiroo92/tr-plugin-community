@@ -8,6 +8,8 @@
 
 推荐添加自建插件来源，启用后刷新发现页并安装「社群中心」。
 
+当前插件标识为 `moonup.community`，用户入口为 `/ext/moonup.community`。从旧标识版本切换时，先停用旧插件，再安装新项并填写配置；宿主为新标识创建独立数据目录。
+
 - 名称：社群中心 · kiroo92
 - 来源 URL：`https://github.com/kiroo92/tr-plugin-community/releases/latest/download/index.json`
 - Ed25519 公钥：`R1zeOnAlclBZjK8RPlPqFh7wZzeiD/WTk2OjnXHJ8S0=`
@@ -66,7 +68,7 @@
 - 图片仅通过带认证和资格检查的 GET /image 返回 PNG data URL。SDK 前端通过 host.request 读取，前端不会收到服务器绝对路径。管理路由额外校验 admin 身份。
 - Shutdown 取消轮询和外部请求，等待后台退出，关闭 HTTP 空闲连接及 SQLite。测试在 plugintest.New(t) 后注册 Shutdown，确保文件句柄先关，再由 testing 清理独立 DataDir/StateDir。
 - 普通卸载保留 DataDir，显式清除数据才删除（由目标宿主负责）。备份时先停用插件，再备份整个 DataDir；同时备份宿主的插件 secret 配置。不要运行时只复制主 SQLite 文件而忽略 WAL。
-- 插件 ID 为 kiroo92.community；不会读取或迁移旧 tokenflux.telegram-access 绑定草稿的数据，也不会修改宿主数据库结构。
+- 插件 ID 为 `moonup.community`，用户入口为 `/ext/moonup.community`，管理入口为 `/admin/ext/moonup.community`。宿主按此标识创建独立安装记录和数据目录。
 
 ## 构建与检查
 

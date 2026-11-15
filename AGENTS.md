@@ -1,6 +1,7 @@
 # 社群中心正式插件
 
 - 独立 Git 仓库为 https://github.com/kiroo92/tr-plugin-community，主分支 main；只在本目录提交，不包含工作区其它插件。
+- 插件标识为 moonup.community，用户入口 /ext/moonup.community，管理入口 /admin/ext/moonup.community。plugin.json 与前端构建的 pluginId 保持一致。
 - 自建分发沿用福利插件方式：GitHub Releases latest/download/index.json 加独立 Ed25519 签名，公钥见 README；五平台安装包使用固定版本 URL。完整草稿下载验签及哈希核对后公开，不替换同版本资产。私钥在用户配置目录 TokenRouter/plugin-signing/tr-plugin-community.key，禁止进入项目或发行包，需由维护者备份。
 
 - 原型见 ../telegram-prototype/index.html；正式实现仅邀请领取、AI 助手和公开渠道状态图。禁止恢复 TG 绑定、套餐发放或入群验证。

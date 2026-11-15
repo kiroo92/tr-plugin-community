@@ -1,3 +1,8 @@
+# v0.2.4
+
+- 插件标识改为 `moonup.community`，用户入口改为 `/ext/moonup.community`，管理入口改为 `/admin/ext/moonup.community`。
+- 此标识使用独立安装与数据目录；先停用旧插件，再安装新项并填写配置。
+
 # v0.2.3
 
 - 邀请改为 `creates_join_request=true`，由插件控制每条链接最多自动批准一人。
