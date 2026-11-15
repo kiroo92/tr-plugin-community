@@ -1,0 +1,155 @@
+package app
+
+import (
+	"context"
+	"errors"
+	"math/big"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	pluginpb "github.com/TokenFlux/TokenRouter/plugin-sdk/go/pluginpb/v1"
+)
+
+const lifetime = 10 * time.Minute
+
+type Invite struct {
+	UserID  int64  `json:"user_id"`
+	URL     string `json:"url,omitempty"`
+	Expires int64  `json:"expires"`
+	Created int64  `json:"created"`
+	Used    bool   `json:"used"`
+	Revoke  bool   `json:"revoke"`
+	Revoked bool   `json:"revoked"`
+	Pending bool   `json:"pending"`
+	Source  string `json:"source"`
+}
+
+func (plugin *Plugin) eligible(ctx context.Context, userID int64) (string, error) {
+	user, err := plugin.env.Host.Users.Get(ctx, userID)
+	if err != nil {
+		return "", errors.New("无法读取账号状态")
+	}
+	if user.Status != "active" {
+		return "", nil
+	}
+	identities, err := plugin.env.Host.Users.Identities(ctx, userID)
+	if err != nil {
+		return "", errors.New("无法核验 LinuxDO 绑定")
+	}
+	for _, identity := range identities.Identities {
+		if identity.GetProviderType() == "linuxdo" && identity.GetSubject() != "" {
+			return "LinuxDO 绑定", nil
+		}
+	}
+	for page := int32(1); page <= 100; page++ {
+		result, err := plugin.env.Host.Orders.ListForUser(ctx, &pluginpb.ListUserOrdersRequest{UserId: userID, Page: page, PageSize: 50, Status: "COMPLETED"})
+		if err != nil {
+			return "", errors.New("无法核验充值订单")
+		}
+		for _, order := range result.Orders {
+			amount, valid := new(big.Rat).SetString(order.GetAmount())
+			if order.GetType() == "balance" && order.GetStatus() == "COMPLETED" && order.GetPaidUnix() > 0 && valid && amount.Sign() > 0 {
+				return "余额充值", nil
+			}
+		}
+		if int64(page)*50 >= result.Total {
+			return "", nil
+		}
+		if len(result.Orders) == 0 {
+			return "", errors.New("订单分页不完整，请稍后重试")
+		}
+	}
+	// shortcut: 最多核验 5000 条订单，宿主提供资格存在性查询后替换分页扫描。
+	return "", errors.New("历史订单过多，请联系管理员核实")
+}
+
+func (plugin *Plugin) inviteKey(userID int64) string {
+	return plugin.scoped("invite/" + strconv.FormatInt(userID, 10))
+}
+func (plugin *Plugin) issue(ctx context.Context, userID int64, source string) (Invite, error) {
+	var current Invite
+	if _, err := plugin.load(ctx, plugin.inviteKey(userID), &current); err != nil {
+		return current, err
+	}
+	if current.Used {
+		return current, errors.New("该账号已使用入群资格")
+	}
+	if current.Revoke {
+		return current, errors.New("旧邀请正在撤销，请稍后重试")
+	}
+	if current.Expires > plugin.now().Unix() {
+		if current.Pending {
+			return current, errors.New("上次创建结果待确认，请在 10 分钟有效期结束后重试")
+		}
+		if !current.Revoked {
+			return current, nil
+		}
+	}
+	if err := plugin.checkBot(ctx); err != nil {
+		return current, err
+	}
+	current = Invite{UserID: userID, Source: source, Created: plugin.now().Unix(), Expires: plugin.now().Add(lifetime).Unix(), Pending: true}
+	if err := plugin.save(ctx, plugin.inviteKey(userID), current); err != nil {
+		return current, err
+	}
+	var result struct {
+		Link string `json:"invite_link"`
+	}
+	err := plugin.telegram(ctx, "createChatInviteLink", map[string]any{"chat_id": plugin.chat, "expire_date": current.Expires, "member_limit": 1, "name": "web-" + strconv.FormatInt(userID, 10)}, &result)
+	if err != nil {
+		return Invite{}, errors.New("创建邀请未确认，避免重复生成，请在 10 分钟后重试")
+	}
+	parsed, err := url.Parse(result.Link)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "t.me" || parsed.User != nil || !strings.HasPrefix(parsed.Path, "/+") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return Invite{}, errors.New("Telegram 返回了无效邀请")
+	}
+	current.URL = result.Link
+	current.Pending = false
+	if err := plugin.save(ctx, plugin.inviteKey(userID), current); err != nil {
+		_ = plugin.telegram(ctx, "revokeChatInviteLink", map[string]any{"chat_id": plugin.chat, "invite_link": current.URL}, nil)
+		return Invite{}, err
+	}
+	_ = plugin.event(ctx, "生成入群邀请", "网站账号 "+strconv.FormatInt(userID, 10)+"，有效期 10 分钟。")
+	return current, nil
+}
+
+func (plugin *Plugin) revoke(ctx context.Context, current *Invite) error {
+	if current.URL == "" {
+		return errors.New("邀请创建结果待确认，无法手动撤销")
+	}
+	current.Revoke = true
+	if err := plugin.save(ctx, plugin.inviteKey(current.UserID), current); err != nil {
+		return err
+	}
+	if err := plugin.telegram(ctx, "revokeChatInviteLink", map[string]any{"chat_id": plugin.chat, "invite_link": current.URL}, nil); err != nil {
+		if current.Expires > plugin.now().Unix() {
+			return err
+		}
+	}
+	current.Revoke = false
+	current.Revoked = true
+	return plugin.save(ctx, plugin.inviteKey(current.UserID), current)
+}
+
+func (plugin *Plugin) invites(ctx context.Context, before int64) ([]Invite, error) {
+	rows, err := plugin.db.QueryContext(ctx, "SELECT value FROM records WHERE key LIKE ? AND CAST(json_extract(value,'$.user_id') AS INTEGER)>? ORDER BY CAST(json_extract(value,'$.user_id') AS INTEGER) LIMIT 51", plugin.scoped("invite/%"), before)
+	if err != nil {
+		return nil, errors.New("无法读取邀请记录")
+	}
+	defer rows.Close()
+	records := make([]Invite, 0)
+	for rows.Next() {
+		var raw string
+		var record Invite
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if err := decodeRecord(raw, &record); err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}

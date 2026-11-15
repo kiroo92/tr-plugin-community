@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "id": "kiroo92.community",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "minHostVersion": "0.7.3",
+  "name": {
+    "en": "社群中心",
+    "zh": "社群中心"
+  },
+  "description": {
+    "en": "符合网站资格后领取 Telegram 邀请，使用 AI 群聊助手及公开渠道状态图。",
+    "zh": "符合网站资格后领取 Telegram 邀请，使用 AI 群聊助手及公开渠道状态图。"
+  },
+  "publisher": {
+    "name": "kiroo92"
+  },
+  "license": "MIT",
+  "icon": "icon.svg",
+  "permissions": [
+    "user.read",
+    "user.identities",
+    "payment.read",
+    "catalog.read"
+  ],
+  "backend": {
+    "executable": "bin/plugin",
+    "routes": [
+      {
+        "method": "GET",
+        "path": "/status",
+        "auth": "user",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/invite",
+        "auth": "user",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "GET",
+        "path": "/image",
+        "auth": "user",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "GET",
+        "path": "/admin/status",
+        "auth": "admin",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "GET",
+        "path": "/admin/invites",
+        "auth": "admin",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/admin/settings",
+        "auth": "admin",
+        "maxBodyBytes": 16384,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/admin/check",
+        "auth": "admin",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/admin/revoke",
+        "auth": "admin",
+        "maxBodyBytes": 1024,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/admin/clear",
+        "auth": "admin",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/admin/refresh",
+        "auth": "admin",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      },
+      {
+        "method": "POST",
+        "path": "/admin/send",
+        "auth": "admin",
+        "maxBodyBytes": 0,
+        "timeoutSeconds": 60
+      }
+    ]
+  },
+  "frontend": {
+    "entry": "frontend/index.js",
+    "styles": [
+      "frontend/index.css"
+    ],
+    "pages": [
+      {
+        "id": "home",
+        "path": "",
+        "audience": "user",
+        "title": {
+          "en": "社群中心",
+          "zh": "社群中心"
+        }
+      },
+      {
+        "id": "admin",
+        "path": "",
+        "audience": "admin",
+        "title": {
+          "en": "社群管理",
+          "zh": "社群管理"
+        }
+      }
+    ],
+    "menus": [
+      {
+        "page": "home",
+        "label": {
+          "en": "社群中心",
+          "zh": "社群中心"
+        },
+        "icon": "frontend/menu.svg",
+        "order": 115
+      },
+      {
+        "page": "admin",
+        "label": {
+          "en": "社群管理",
+          "zh": "社群管理"
+        },
+        "icon": "frontend/menu.svg",
+        "order": 115
+      }
+    ]
+  },
+  "config": {
+    "fields": [
+      {
+        "key": "bot_token",
+        "type": "secret",
+        "label": {
+          "en": "专用 Telegram Bot Token",
+          "zh": "专用 Telegram Bot Token"
+        }
+      },
+      {
+        "key": "chat_id",
+        "type": "string",
+        "label": {
+          "en": "私有超级群组 ID（-100 开头）",
+          "zh": "私有超级群组 ID（-100 开头）"
+        },
+        "maxLength": 32
+      },
+      {
+        "key": "ai_key",
+        "type": "secret",
+        "label": {
+          "en": "模型 API Key",
+          "zh": "模型 API Key"
+        }
+      }
+    ]
+  }
+}
