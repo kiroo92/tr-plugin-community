@@ -24,19 +24,22 @@ import (
 )
 
 type fixture struct {
-	t            *testing.T
-	host         *plugintest.Harness
-	plugin       *Plugin
-	server       *httptest.Server
-	clock        time.Time
-	linux        bool
-	orders       []*pluginpb.Order
-	catalog      []byte
-	catalogError bool
-	updates      []Update
-	calls        map[string]int
-	fail         string
-	modelBody    map[string]any
+	t             *testing.T
+	host          *plugintest.Harness
+	plugin        *Plugin
+	server        *httptest.Server
+	clock         time.Time
+	linux         bool
+	orders        []*pluginpb.Order
+	catalog       []byte
+	catalogError  bool
+	updates       []Update
+	calls         map[string]int
+	fail          string
+	modelBody     map[string]any
+	groupType     string
+	groupName     string
+	joinByRequest bool
 }
 
 func setup(t *testing.T) *fixture {
@@ -124,7 +127,11 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 	case "getWebhookInfo":
 		result = map[string]string{"url": ""}
 	case "getChat":
-		result = map[string]string{"type": "supergroup", "username": ""}
+		kind := f.groupType
+		if kind == "" {
+			kind = "supergroup"
+		}
+		result = map[string]any{"type": kind, "username": f.groupName, "join_by_request": f.joinByRequest}
 	case "getChatMember":
 		result = map[string]any{"status": "administrator", "can_invite_users": true}
 	case "createChatInviteLink":
@@ -138,6 +145,14 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 		result = map[string]string{"invite_link": fmt.Sprintf("https://t.me/+test%d", f.calls[method])}
 	case "getUpdates":
 		result = f.updates
+	case "declineChatJoinRequest":
+		var input map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			f.t.Error(err)
+		}
+		if input["user_id"] == nil {
+			f.t.Error("decline requires user_id")
+		}
 	case "sendPhoto", "editMessageMedia":
 		if err := request.ParseMultipartForm(1 << 20); err != nil {
 			f.t.Error(err)
@@ -302,6 +317,53 @@ func TestInvitationsAndPermissions(t *testing.T) {
 	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
 	f.host.Env.Permissions = nil
 	mustStatus(t, f.request("GET", "/status", "", "user"), 502)
+}
+
+func TestPublicGroupAndJoinRequests(t *testing.T) {
+	f := setup(t)
+	f.plugin.settings.Invites = true
+	if err := f.plugin.save(context.Background(), "settings", f.plugin.settings); err != nil {
+		t.Fatal(err)
+	}
+	f.groupName = "moonup_chat"
+	f.joinByRequest = true
+	mustStatus(t, f.request("POST", "/admin/check", "", "admin"), 200)
+	var group GroupState
+	if _, err := f.plugin.load(context.Background(), f.plugin.scoped("group"), &group); err != nil {
+		t.Fatal(err)
+	}
+	if !group.Public || group.Username != "moonup_chat" || !group.Approval {
+		t.Fatalf("公开群与审批状态未记录: %+v", group)
+	}
+	// 公开群 + 群级审批：机器人链接仍可直接创建并领取。
+	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
+	var current Invite
+	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &current); err != nil {
+		t.Fatal(err)
+	}
+	// 转发链接产生的入群请求被拒，且不能冒充领取成功。
+	raw := fmt.Sprintf(`{"update_id":300,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":777},"invite_link":{"invite_link":%q}}}`, current.URL)
+	var update Update
+	if err := json.Unmarshal([]byte(raw), &update); err != nil {
+		t.Fatal(err)
+	}
+	f.updates = []Update{update}
+	if err := f.plugin.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls["declineChatJoinRequest"] != 1 {
+		t.Fatal("转发链接的入群请求未被拒绝")
+	}
+	var after Invite
+	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Used {
+		t.Fatal("被拒绝的请求不应标记邀请已使用")
+	}
+	// 普通群仍被拒绝。
+	f.groupType = "group"
+	mustStatus(t, f.request("POST", "/admin/check", "", "admin"), 502)
 }
 
 func TestStatusReportsEachCondition(t *testing.T) {

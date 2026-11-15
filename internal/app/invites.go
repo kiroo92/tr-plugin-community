@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"math/big"
 	"net/url"
@@ -147,6 +148,40 @@ func (plugin *Plugin) revoke(ctx context.Context, current *Invite) error {
 	current.Revoke = false
 	current.Revoked = true
 	return plugin.save(ctx, plugin.inviteKey(current.UserID), current)
+}
+
+// inviteByLink 用链接反查领取记录；不存在时返回 ok=false。
+func (plugin *Plugin) inviteByLink(ctx context.Context, link string) (Invite, bool, error) {
+	var raw string
+	err := plugin.db.QueryRowContext(ctx, "SELECT value FROM records WHERE key LIKE ? AND json_extract(value,'$.url')=? LIMIT 1", plugin.scoped("invite/%"), link).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Invite{}, false, nil
+	}
+	if err != nil {
+		return Invite{}, false, errors.New("匹配入群邀请失败")
+	}
+	var current Invite
+	if err := decodeRecord(raw, &current); err != nil {
+		return Invite{}, false, err
+	}
+	return current, true, nil
+}
+
+// rejectJoin 拒绝通过插件链接发起的入群请求并记录事件。
+// 群级审批只拦直接加入，链接本身不核对 Telegram 身份，转发后无法归属到领取者，
+// 因此对这类请求一律拒绝，要求本人从网站重新领取。
+func (plugin *Plugin) rejectJoin(ctx context.Context, userID int64, link string) error {
+	current, found, err := plugin.inviteByLink(ctx, link)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	if err := plugin.telegram(ctx, "declineChatJoinRequest", map[string]any{"chat_id": plugin.chat, "user_id": userID}, nil); err != nil {
+		return err
+	}
+	return plugin.event(ctx, "拒绝了入群请求", "链接对应网站账号 "+strconv.FormatInt(current.UserID, 10)+"；链接可能已被转发，请本人重新领取。")
 }
 
 func (plugin *Plugin) invites(ctx context.Context, before int64) ([]Invite, error) {

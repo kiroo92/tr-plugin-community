@@ -48,6 +48,11 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	switch request.URL.Path {
 	case "/status", "/invite":
+		var group GroupState
+		if _, err := plugin.load(ctx, plugin.scoped("group"), &group); err != nil {
+			problem(writer, 500, err)
+			return
+		}
 		qualification, err := plugin.eligible(ctx, caller.UserID)
 		if err != nil {
 			problem(writer, 502, err)
@@ -77,7 +82,7 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 		if source == "" || !plugin.settings.Invites || current.Used || current.Revoked || current.Revoke || current.Expires <= plugin.now().Unix() {
 			current.URL = ""
 		}
-		sdk.WriteJSON(writer, 200, map[string]any{"eligible": source != "", "source": source, "linuxdo": qualification.LinuxDO, "recharge": qualification.Recharge, "enabled": plugin.settings.Invites && plugin.token != "", "group": plugin.settings.Group, "invite": current, "ai": plugin.settings.AI, "name": plugin.settings.Name, "channels": plugin.settings.Channels, "keywords": plugin.settings.Keywords, "now": plugin.now().Unix()})
+		sdk.WriteJSON(writer, 200, map[string]any{"eligible": source != "", "source": source, "linuxdo": qualification.LinuxDO, "recharge": qualification.Recharge, "enabled": plugin.settings.Invites && plugin.token != "", "group": plugin.settings.Group, "invite": current, "ai": plugin.settings.AI, "name": plugin.settings.Name, "channels": plugin.settings.Channels, "keywords": plugin.settings.Keywords, "public": group.Public, "approval": group.Approval, "now": plugin.now().Unix()})
 	case "/image":
 		if caller.Role != "admin" {
 			qualification, err := plugin.eligible(ctx, caller.UserID)
@@ -101,7 +106,8 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 		var events []Event
 		var bot Bot
 		var channel ChannelState
-		for key, target := range map[string]any{"events": &events, "bot": &bot, "channel": &channel} {
+		var group GroupState
+		for key, target := range map[string]any{"events": &events, "bot": &bot, "channel": &channel, "group": &group} {
 			if _, err := plugin.load(ctx, plugin.scoped(key), target); err != nil {
 				problem(writer, 500, err)
 				return
@@ -113,7 +119,7 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 		channel.Encoded = ""
-		sdk.WriteJSON(writer, 200, map[string]any{"settings": plugin.settings, "configured": plugin.token != "", "ai_key_set": plugin.key != "", "bot": bot, "channel": channel, "usage": usage, "events": events})
+		sdk.WriteJSON(writer, 200, map[string]any{"settings": plugin.settings, "configured": plugin.token != "", "ai_key_set": plugin.key != "", "bot": bot, "group": group, "channel": channel, "usage": usage, "events": events})
 	case "/admin/invites":
 		after, err := strconv.ParseInt(request.URL.Query().Get("after"), 10, 64)
 		if request.URL.Query().Get("after") == "" {

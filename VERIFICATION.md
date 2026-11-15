@@ -13,6 +13,15 @@
 - 自建分发 v0.1.0：重新执行 build.ps1 通过，以完整草稿上传 11 个资产后下载核对五平台包 SHA256/大小及 manifest 哈希；SDK index sign 校验索引结构并签名，独立 Ed25519 验签及篡改拒绝通过。公开为 latest 后匿名下载固定来源 index.json 和 index.json.sig，再次核对原始字节并验签通过。来源和公钥见 README；私钥只保存在用户配置目录，未进入 Git 或 Release。宿主内添加来源与实际安装仍未验证。
 - 自建分发 v0.2.0：manifest 升至 0.2.0；build.ps1 串行执行 go test/go vet、frozen install、前端构建及五平台编译打包，五包逐个 trplugin validate 通过（旧 0.1.0 包先移出 release 目录，避免与新版 checksums 混检）。索引保留 0.1.0 条目并新增 0.2.0，使用同一私钥 index sign。认证下载草稿 11 个资产逐一与本地 SHA256/大小一致，manifest 哈希匹配，签名有效且篡改被拒；公开为 latest 后匿名下载 index.json、index.json.sig 与 linux/amd64 包，验签通过且包哈希与索引一致。包内前端确认为靛紫变量（#4f46e5 / #a5b4fc），plugin.json 为 0.2.0。
 
+- 公开群与入群审批（2026-11-15 追加）：依据 Bot API `getChat.join_by_request` 定义——
+  「True, if all users directly joining the supergroup without using an invite link need to be approved」，
+  以及 `createChatInviteLink` 只要求机器人是管理员。据此移除「必须无公开用户名」的硬限制，改为只要求 `supergroup`。
+  检查连接时读取 `username`、`join_by_request` 存入作用域，`/admin/status` 与 `/status` 返回 `group`/`public`/`approval`，
+  管理概览与用户页显示当前模式。新增测试 TestPublicGroupAndJoinRequests：公开群 + 审批开启可通过检查并正常领取；
+  转发链接产生的 `chat_join_request` 触发一次 `declineChatJoinRequest` 且不把邀请标记为已使用；普通群仍被拒绝（502）。
+  十组 Go 测试、go vet、前端类型检查与构建通过；开发壳确认用户页显示「本链接直接入群，无需审批」、管理端显示
+  「公开群 @moonup_chat, 入群审批已开」。未在真实公开群验证审批与链接并存的行为。
+
 ## 未验证及限制
 
 - go test -race ./... 未完成：默认 CGO_ENABLED=0；显式启用后报 C compiler gcc not found。本机没有可用 C 编译器，未擅自安装。八组普通测试已通过，此项不能视为竞态检测通过。

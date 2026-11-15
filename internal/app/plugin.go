@@ -113,7 +113,7 @@ func (plugin *Plugin) credentials(config sdk.Config) error {
 		}
 		groupID, err := strconv.ParseInt(chat, 10, 64)
 		if err != nil || groupID >= 0 || !strings.HasPrefix(chat, "-100") {
-			return errors.New("请配置 -100 开头的私有超级群组 ID")
+			return errors.New("请配置 -100 开头的超级群组 ID（公开或私有均可）")
 		}
 	}
 	botID, _, _ := strings.Cut(token, ":")

@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +77,14 @@ type Bot struct {
 	Username string `json:"username"`
 }
 
+// GroupState 记录检查连接时读到的目标群组属性，用于管理端提示门禁是否成立。
+type GroupState struct {
+	ChatID   string `json:"chat_id"`
+	Public   bool   `json:"public"`
+	Username string `json:"username,omitempty"`
+	Approval bool   `json:"approval"`
+}
+
 func (plugin *Plugin) checkBot(ctx context.Context) error {
 	if plugin.token == "" {
 		return errors.New("请先在宿主插件配置中填写 Bot Token 和群组 ID")
@@ -96,14 +103,22 @@ func (plugin *Plugin) checkBot(ctx context.Context) error {
 		return errors.New("机器人已有 Webhook，请使用专用机器人；插件不会删除已有 Webhook")
 	}
 	var chat struct {
-		Type     string `json:"type"`
-		Username string `json:"username"`
+		Type          string `json:"type"`
+		Username      string `json:"username"`
+		JoinByRequest bool   `json:"join_by_request"`
+		JoinToSend    bool   `json:"join_to_send_messages"`
 	}
 	if err := plugin.telegram(ctx, "getChat", map[string]any{"chat_id": plugin.chat}, &chat); err != nil {
 		return err
 	}
-	if chat.Type != "supergroup" || chat.Username != "" {
-		return errors.New("需要无公开用户名的私有超级群组")
+	if chat.Type != "supergroup" {
+		return errors.New("需要超级群组（公开或私有均可）")
+	}
+	// 群级审批只拦截不使用邀请链接的直接加入；机器人链接照常直接进群，
+	// 因此公开群开启审批时资格校验仍然生效。见 Bot API getChat.join_by_request。
+	group := GroupState{ChatID: plugin.chat, Public: chat.Username != "", Username: chat.Username, Approval: chat.JoinByRequest}
+	if err := plugin.save(ctx, plugin.scoped("group"), group); err != nil {
+		return err
 	}
 	var member struct {
 		Status string `json:"status"`
@@ -151,6 +166,17 @@ type Update struct {
 			IsMember bool   `json:"is_member"`
 		} `json:"new_chat_member"`
 	} `json:"chat_member"`
+	Join *struct {
+		Chat struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+		From struct {
+			ID int64 `json:"id"`
+		} `json:"from"`
+		Invite struct {
+			Link string `json:"invite_link"`
+		} `json:"invite_link"`
+	} `json:"chat_join_request"`
 }
 
 func (plugin *Plugin) poll(ctx context.Context) error {
@@ -173,7 +199,7 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 		return err
 	}
 	var updates []Update
-	if err := plugin.telegram(ctx, "getUpdates", map[string]any{"offset": offset, "limit": 50, "timeout": 0, "allowed_updates": []string{"message", "chat_member"}}, &updates); err != nil {
+	if err := plugin.telegram(ctx, "getUpdates", map[string]any{"offset": offset, "limit": 50, "timeout": 0, "allowed_updates": []string{"message", "chat_member", "chat_join_request"}}, &updates); err != nil {
 		return err
 	}
 	for _, update := range updates {
@@ -181,21 +207,26 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 			continue
 		}
 		if update.Member != nil && strconv.FormatInt(update.Member.Chat.ID, 10) == plugin.chat && update.Member.Invite.Link != "" && (update.Member.New.Status == "member" || update.Member.New.Status == "administrator" || update.Member.New.Status == "restricted" && update.Member.New.IsMember) {
-			var raw string
-			err := plugin.db.QueryRowContext(ctx, "SELECT value FROM records WHERE key LIKE ? AND json_extract(value,'$.url')=? LIMIT 1", plugin.scoped("invite/%"), update.Member.Invite.Link).Scan(&raw)
-			if err == nil {
-				var current Invite
-				if err := decodeRecord(raw, &current); err != nil {
-					return err
-				}
+			current, found, err := plugin.inviteByLink(ctx, update.Member.Invite.Link)
+			if err != nil {
+				return err
+			}
+			if found {
 				current.Used = true
 				current.Revoke = true
 				if err := plugin.save(ctx, plugin.inviteKey(current.UserID), current); err != nil {
 					return err
 				}
 				_ = plugin.revoke(ctx, &current)
-			} else if !errors.Is(err, sql.ErrNoRows) {
-				return errors.New("匹配入群邀请失败")
+			}
+		}
+		if update.Join != nil && strconv.FormatInt(update.Join.Chat.ID, 10) == plugin.chat && update.Join.Invite.Link != "" {
+			// 正常配置下插件创建的链接不要求审批，这里不会收到事件；
+			// 若管理员在群内把该链接改为需审批，则无法分辨领取者，直接拒绝。
+			if err := plugin.rejectJoin(ctx, update.Join.From.ID, update.Join.Invite.Link); err != nil {
+				if eventErr := plugin.event(ctx, "拒绝入群请求失败", err.Error()); eventErr != nil {
+					return eventErr
+				}
 			}
 		}
 		if update.Message != nil && strconv.FormatInt(update.Message.Chat.ID, 10) == plugin.chat && !update.Message.From.Bot && update.Message.Date >= plugin.now().Unix()-120 && len(update.Message.Text) <= 12000 {
