@@ -24,6 +24,8 @@
 
 - 自建分发 v0.2.1：build.ps1 串行执行 go test（10 组）、go vet、frozen install、前端构建（含公开群文案）与五平台编译打包，五包逐个 validate 通过；索引保留 0.2.0、0.1.0 并新增 0.2.1，使用同一私钥签名。草稿 11 资产认证下载后与本地 SHA256/大小逐一一致，manifest 哈希匹配，验签通过且篡改被拒；公开为 latest 后匿名读取 latest 来源，版本为 0.2.1、验签通过，linux/amd64 与 windows/amd64 包哈希与索引一致。包内确认含「公开或私有」新文案与 0.2.1 版本号。
 
+- 入群审批按链接判定（v0.2.2，2026-11-15）：用户实测公开群开启群级审批后邀请链接同样需要审批，推翻此前「链接直接进群」的假设。改为订阅 chat_join_request，用 ChatInviteLink.invite_link 反查记录：匹配且未使用/未过期/未撤销则 approveChatJoinRequest，其余 declineChatJoinRequest；批准前先落库已使用，失败回滚。TestPublicGroupAndJoinRequests 覆盖「插件链接被批准并标记已使用」与「非插件链接被拒绝」，10 组 Go 测试、go vet、前端类型检查与构建通过。注意：未在真实公开群端到端验证审批回调；机器人缺 can_invite_users 时无法批准或拒绝。
+
 ## 未验证及限制
 
 - go test -race ./... 未完成：默认 CGO_ENABLED=0；显式启用后报 C compiler gcc not found。本机没有可用 C 编译器，未擅自安装。八组普通测试已通过，此项不能视为竞态检测通过。

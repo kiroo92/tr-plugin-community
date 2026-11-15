@@ -114,8 +114,8 @@ func (plugin *Plugin) checkBot(ctx context.Context) error {
 	if chat.Type != "supergroup" {
 		return errors.New("需要超级群组（公开或私有均可）")
 	}
-	// 群级审批只拦截不使用邀请链接的直接加入；机器人链接照常直接进群，
-	// 因此公开群开启审批时资格校验仍然生效。见 Bot API getChat.join_by_request。
+	// 公开群必须开启群级审批才能形成门禁：否则任何人直接用 @用户名 就能进群。
+	// 开启审批后由插件按 chat_join_request 携带的链接决定批准或拒绝。
 	group := GroupState{ChatID: plugin.chat, Public: chat.Username != "", Username: chat.Username, Approval: chat.JoinByRequest}
 	if err := plugin.save(ctx, plugin.scoped("group"), group); err != nil {
 		return err
@@ -173,6 +173,7 @@ type Update struct {
 		From struct {
 			ID int64 `json:"id"`
 		} `json:"from"`
+		// ChatJoinRequest.invite_link 是 ChatInviteLink 对象，不是字符串。
 		Invite struct {
 			Link string `json:"invite_link"`
 		} `json:"invite_link"`
@@ -220,11 +221,11 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 				_ = plugin.revoke(ctx, &current)
 			}
 		}
-		if update.Join != nil && strconv.FormatInt(update.Join.Chat.ID, 10) == plugin.chat && update.Join.Invite.Link != "" {
-			// 正常配置下插件创建的链接不要求审批，这里不会收到事件；
-			// 若管理员在群内把该链接改为需审批，则无法分辨领取者，直接拒绝。
-			if err := plugin.rejectJoin(ctx, update.Join.From.ID, update.Join.Invite.Link); err != nil {
-				if eventErr := plugin.event(ctx, "拒绝入群请求失败", err.Error()); eventErr != nil {
+		if update.Join != nil && strconv.FormatInt(update.Join.Chat.ID, 10) == plugin.chat {
+			// 群级审批覆盖邀请链接时，按请求携带的链接判定：插件签发的批准，
+			// 其余（公开入口、直接加入、过期链接）拒绝。
+			if err := plugin.resolveJoin(ctx, update.Join.From.ID, update.Join.Invite.Link); err != nil {
+				if eventErr := plugin.event(ctx, "处理入群请求失败", err.Error()); eventErr != nil {
 					return eventErr
 				}
 			}

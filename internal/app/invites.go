@@ -167,21 +167,43 @@ func (plugin *Plugin) inviteByLink(ctx context.Context, link string) (Invite, bo
 	return current, true, nil
 }
 
-// rejectJoin 拒绝通过插件链接发起的入群请求并记录事件。
-// 群级审批只拦直接加入，链接本身不核对 Telegram 身份，转发后无法归属到领取者，
-// 因此对这类请求一律拒绝，要求本人从网站重新领取。
-func (plugin *Plugin) rejectJoin(ctx context.Context, userID int64, link string) error {
+// resolveJoin 处理一条入群审批请求：链接是插件签发的就批准并登记使用，
+// 其余（公开入口、直接加入、已撤销链接）一律拒绝。
+// ChatJoinRequest 自带 invite_link，因此可以在审批阶段按链接判定归属；
+// 群级审批会覆盖邀请链接时，这条路径就是公开群的门禁。
+func (plugin *Plugin) resolveJoin(ctx context.Context, userID int64, link string) error {
 	current, found, err := plugin.inviteByLink(ctx, link)
 	if err != nil {
 		return err
 	}
 	if !found {
-		return nil
+		if err := plugin.telegram(ctx, "declineChatJoinRequest", map[string]any{"chat_id": plugin.chat, "user_id": userID}, nil); err != nil {
+			return err
+		}
+		return plugin.event(ctx, "拒绝了入群请求", "未使用网站领取的邀请链接，已自动拒绝。")
 	}
-	if err := plugin.telegram(ctx, "declineChatJoinRequest", map[string]any{"chat_id": plugin.chat, "user_id": userID}, nil); err != nil {
+	if current.Used || current.Revoked || current.Revoke || current.Expires <= plugin.now().Unix() {
+		if err := plugin.telegram(ctx, "declineChatJoinRequest", map[string]any{"chat_id": plugin.chat, "user_id": userID}, nil); err != nil {
+			return err
+		}
+		return plugin.event(ctx, "拒绝了过期或已撤销的邀请", "网站账号 "+strconv.FormatInt(current.UserID, 10)+" 的邀请不可再用。")
+	}
+	// 先持久化已使用再批准，避免批准成功后崩溃导致同一链接被再次使用。
+	current.Used = true
+	current.Revoke = true
+	if err := plugin.save(ctx, plugin.inviteKey(current.UserID), current); err != nil {
 		return err
 	}
-	return plugin.event(ctx, "拒绝了入群请求", "链接对应网站账号 "+strconv.FormatInt(current.UserID, 10)+"；链接可能已被转发，请本人重新领取。")
+	if err := plugin.telegram(ctx, "approveChatJoinRequest", map[string]any{"chat_id": plugin.chat, "user_id": userID}, nil); err != nil {
+		current.Used = false
+		current.Revoke = false
+		if saveErr := plugin.save(ctx, plugin.inviteKey(current.UserID), current); saveErr != nil {
+			return saveErr
+		}
+		return err
+	}
+	_ = plugin.revoke(ctx, &current)
+	return plugin.event(ctx, "批准了入群请求", "网站账号 "+strconv.FormatInt(current.UserID, 10)+" 通过领取的邀请入群，链接已撤销。")
 }
 
 func (plugin *Plugin) invites(ctx context.Context, before int64) ([]Invite, error) {

@@ -341,7 +341,7 @@ func TestPublicGroupAndJoinRequests(t *testing.T) {
 	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &current); err != nil {
 		t.Fatal(err)
 	}
-	// 转发链接产生的入群请求被拒，且不能冒充领取成功。
+	// 使用插件链接的审批请求应被批准，并登记为已使用。
 	raw := fmt.Sprintf(`{"update_id":300,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":777},"invite_link":{"invite_link":%q}}}`, current.URL)
 	var update Update
 	if err := json.Unmarshal([]byte(raw), &update); err != nil {
@@ -351,15 +351,27 @@ func TestPublicGroupAndJoinRequests(t *testing.T) {
 	if err := f.plugin.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["declineChatJoinRequest"] != 1 {
-		t.Fatal("转发链接的入群请求未被拒绝")
+	if f.calls["approveChatJoinRequest"] != 1 {
+		t.Fatal("领取链接的入群请求未批准")
 	}
 	var after Invite
 	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &after); err != nil {
 		t.Fatal(err)
 	}
-	if after.Used {
-		t.Fatal("被拒绝的请求不应标记邀请已使用")
+	if !after.Used {
+		t.Fatal("批准后应标记邀请已使用")
+	}
+	// 不带插件链接的请求（公开入口直接加入或已撤销链接）自动拒绝。
+	direct := Update{}
+	if err := json.Unmarshal([]byte(`{"update_id":301,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":888},"invite_link":{"invite_link":"https://t.me/+other"}}}`), &direct); err != nil {
+		t.Fatal(err)
+	}
+	f.updates = []Update{direct}
+	if err := f.plugin.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls["declineChatJoinRequest"] != 1 {
+		t.Fatal("非插件链接的入群请求未拒绝")
 	}
 	// 普通群仍被拒绝。
 	f.groupType = "group"
