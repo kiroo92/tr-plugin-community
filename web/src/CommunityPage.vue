@@ -22,7 +22,7 @@ interface Invite {
  url?:string // permanent bot entry
  created:number // creation Unix seconds
  used:boolean // admission claim consumed
- revoked:boolean // temporary invitation revoked
+ revoked:boolean // group invitation revoked
  revoke:boolean // group cleanup pending
  pending:boolean // invitation creation uncertain
  source:string // verified eligibility source

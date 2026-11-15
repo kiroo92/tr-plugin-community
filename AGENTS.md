@@ -11,5 +11,5 @@
 - 重型命令串行并设置 GOMAXPROCS=2、GOFLAGS=-p=1、GOMEMLIMIT=1GiB。
 - 任务恢复见 TODO.md；正式运行、备份和限制见 README.md。
 - Windows 使用 ./build.ps1 完成测试、前端构建、五平台纯 Go 编译与 SDK 包校验；Go 竞态检测需要额外 C 编译器，结果与未验证范围见 VERIFICATION.md。
-- 群组支持公开或私有超级群组。网站领取永久 `https://t.me/<bot>?start=<随机码>` 链接，不显示倒计时。私聊 Start 首次使用时绑定 Telegram ID，绑定持久化后才私发群邀请；同一 Telegram ID 不得绑定其他网站账号。审批按申请人的 Telegram ID 查绑定并复核网站资格，可处理不带 invite_link 的入群申请。群邀请使用 creates_join_request=true，省略 member_limit；批准前持久化已使用，结果不明时保留锁定，明确拒绝时回滚。公开群须开启群级审批。入口 token 不写日志或管理列表，只能出现在本人领取的机器人 URL 中。
+- 群组支持公开或私有超级群组。网站领取永久 `https://t.me/<bot>?start=<随机码>` 链接，不显示倒计时。私聊 Start 首次使用时绑定 Telegram ID，绑定持久化后才私发群邀请；同一 Telegram ID 不得绑定其他网站账号。审批按申请人的 Telegram ID 查绑定并复核网站资格，可处理不带 invite_link 的入群申请。机器人入口与群邀请均不设有效期。群邀请使用 creates_join_request=true，省略 expire_date 和 member_limit；批准前持久化已使用，结果不明时保留锁定，明确拒绝时回滚。公开群须开启群级审批。入口 token 不写日志或管理列表，只能出现在本人领取的机器人 URL 中。
 - 公共渠道数据通过 Host.Catalog.Models（catalog.read）读取，不抓取宿主私有接口。后台每 5 秒轮询，关闭领取后仍处理旧邀请事件；Shutdown 取消并等待退出后关闭数据库。

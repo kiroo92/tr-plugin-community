@@ -51,7 +51,7 @@ func (plugin *Plugin) issueBotLink(ctx context.Context, userID int64, source str
 	}
 	if current.StartToken == "" {
 		// Persist one cryptographically random token per account. Its lifetime is
-		// independent of the temporary group invitation and survives process restarts.
+		// independent of the permanent group invitation and survives process restarts.
 		random := make([]byte, startTokenBytes)
 		if _, err := rand.Read(random); err != nil {
 			return Invite{}, errors.New("无法生成机器人专属链接")
@@ -84,8 +84,8 @@ func (plugin *Plugin) websiteInvite(ctx context.Context, current Invite, visible
 		current.URL = "https://t.me/" + url.PathEscape(bot.Username) + "?start=" + current.StartToken
 	}
 	current.StartToken = ""
-	// Website expiry describes the permanent bot entry. The stored group expiry
-	// belongs to private invitation delivery and must not become a website countdown.
+	// Website expiry describes the permanent bot entry. Legacy group expiry metadata
+	// belongs to replacement handling and must not become a website countdown.
 	current.Expires = 0
 	return current, nil
 }
@@ -172,7 +172,7 @@ func (plugin *Plugin) handleStart(ctx context.Context, message *Message) error {
 		current, found, err = plugin.inviteForStart(ctx, parts[1])
 	} else if len(parts) == 1 {
 		// Bare Start resumes the sender's existing ownership. This lets a bound
-		// user renew a temporary group invitation through the bot's normal Start button.
+		// user renew a permanent group invitation through the bot's normal Start button.
 		current, found, err = plugin.inviteForTelegram(ctx, message.From.ID)
 	}
 	if err != nil {

@@ -177,19 +177,19 @@ func TestStartRecovery(t *testing.T) {
 	if _, err := f.plugin.load(ctx, f.plugin.scoped("offset"), &offset); err != nil || offset != 701 {
 		t.Fatal("successful replay did not advance the offset", err)
 	}
-	f.clock = f.clock.Add(11 * time.Minute)
+	f.clock = f.clock.Add(365 * 24 * time.Hour)
 	message := &Message{From: TGUser{ID: 777}, Text: "/start"}
 	message.Chat.ID = 777
 	message.Chat.Type = "private"
 	if err := f.plugin.handleStart(ctx, message); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["createChatInviteLink"] != 2 {
-		t.Fatal("bare Start did not renew the internal group invitation")
+	if f.calls["createChatInviteLink"] != 1 {
+		t.Fatal("bare Start replaced a permanent group invitation")
 	}
 	stored, found, err := f.plugin.inviteForTelegram(ctx, 777)
 	if err != nil || !found || stored.StartToken != current.StartToken {
-		t.Fatal("group invitation renewal changed the permanent token", err)
+		t.Fatal("repeated Start changed the permanent token", err)
 	}
 }
 

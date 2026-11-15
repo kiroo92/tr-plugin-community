@@ -14,8 +14,8 @@ import (
 
 // invites.go checks website eligibility and admits each bound Telegram account
 // using its durable website claim. Eligibility comes from LinuxDO identities or
-// completed balance
-// orders. Invitation records belong to the configured bot and group, so each
+// completed balance orders. Invitation records belong to the configured bot and
+// group, so each
 // website account has an independent claim within that scope. Permanent bot
 // entry tokens establish ownership before an admission request is considered.
 //
@@ -24,22 +24,31 @@ import (
 // consumed because Telegram may already have admitted the requester. Revocation
 // follows approval and can be retried independently. Existing ordinary links
 // are revoked before replacement because their member limit counts simultaneous
-// members and cannot enforce a cumulative admission limit. Incoming requests
-// identify their owners through Telegram bindings even when link attribution is absent.
+// members and cannot enforce a cumulative admission limit. Group invitations
+// have no expiry; incoming requests identify their owners through Telegram
+// bindings even when link attribution is absent.
 
-const lifetime = 10 * time.Minute
+// invitationRetryDelay spaces uncertain creation attempts so repeated Start
+// updates do not immediately create another permanent group link.
+const invitationRetryDelay = 30 * time.Second
 
 // Invite stores a website account's invitation and durable admission state.
 type Invite struct {
-	UserID  int64  `json:"user_id"`       // claiming website account
-	URL     string `json:"url,omitempty"` // issued Telegram invitation
-	Expires int64  `json:"expires"`       // expiration Unix seconds
-	Created int64  `json:"created"`       // creation Unix seconds
-	Used    bool   `json:"used"`          // admission claim consumed
-	Revoke  bool   `json:"revoke"`        // revocation awaiting completion
-	Revoked bool   `json:"revoked"`       // revocation considered complete
-	Pending bool   `json:"pending"`       // creation outcome uncertain
-	Source  string `json:"source"`        // website eligibility source
+	UserID int64  `json:"user_id"`       // claiming website account
+	URL    string `json:"url,omitempty"` // issued Telegram invitation
+	// Expires identifies legacy invitations that need replacement. Zero means the
+	// group invitation has no expiry and can be reused until explicitly revoked.
+	Expires int64  `json:"expires"` // legacy expiry Unix seconds
+	Created int64  `json:"created"` // creation Unix seconds
+	Used    bool   `json:"used"`    // admission claim consumed
+	Revoke  bool   `json:"revoke"`  // revocation awaiting completion
+	Revoked bool   `json:"revoked"` // revocation considered complete
+	Pending bool   `json:"pending"` // creation outcome uncertain
+	Source  string `json:"source"`  // website eligibility source
+
+	// RetryAt delays another attempt when group invitation creation is uncertain.
+	// It controls API retries independently of either link's validity or lifetime.
+	RetryAt int64 `json:"retry_at,omitempty"` // creation retry Unix seconds
 
 	// JoinRequest identifies links issued with approval enabled. False marks
 	// legacy ordinary links, which issue revokes before creating a replacement.
@@ -115,9 +124,11 @@ func (plugin *Plugin) inviteKey(userID int64) string {
 // Callers hold plugin.mu and supply the verified eligibility source. Consumed
 // claims and unresolved creations return errors to prevent another admission.
 //
-// Ordinary links from previous versions are revoked before replacement. The
-// pending record is saved before creation so a timeout cannot immediately issue
-// another link, and revocation is attempted if saving the returned link fails.
+// Expiring and ordinary links from previous versions are revoked before
+// replacement. Creation intent is saved with a retry delay before contacting
+// Telegram, so an uncertain response cannot cause an immediate second creation.
+// Successful links remain reusable across time and process restarts until used
+// or revoked, and saving the returned link is followed by private delivery.
 func (plugin *Plugin) issue(ctx context.Context, userID int64, source string) (Invite, error) {
 	var current Invite
 	if _, err := plugin.load(ctx, plugin.inviteKey(userID), &current); err != nil {
@@ -132,59 +143,59 @@ func (plugin *Plugin) issue(ctx context.Context, userID int64, source string) (I
 	if current.Revoke {
 		return current, errors.New("旧邀请正在撤销，请稍后重试")
 	}
-	if current.Expires > plugin.now().Unix() {
-		if current.Pending {
-			return current, errors.New("上次创建结果待确认，请在 10 分钟有效期结束后重试")
-		}
-		if !current.Revoked && current.JoinRequest {
-			return current, nil
-		}
-		if !current.Revoked {
-			// Ordinary public-group links can lose their attribution in clients.
-			// Revoke them before publishing an invitation that requires link approval.
-			if err := plugin.revoke(ctx, &current); err != nil {
-				return current, err
-			}
+	if current.Pending && current.RetryAt > plugin.now().Unix() {
+		return current, errors.New("上次创建邀请结果待确认，请稍后重试")
+	}
+	if current.URL != "" && !current.Pending && !current.Revoked && current.JoinRequest && current.Expires == 0 {
+		return current, nil
+	}
+	if current.URL != "" && !current.Revoked {
+		// Replace legacy invitations before delivering access: an existing expiry
+		// or ordinary link mode must not survive through the permanent-link flow.
+		if err := plugin.revoke(ctx, &current); err != nil {
+			return current, err
 		}
 	}
 	if err := plugin.checkBot(ctx); err != nil {
 		return current, err
 	}
-	// Renew the temporary group entry on the existing record. Its permanent
-	// Start token and bound Telegram identity must survive every invitation renewal.
+	// Replace the group entry on its existing record. Its permanent Start token
+	// and bound Telegram identity survive revocation and creation of another invitation.
 	current.UserID = userID
 	current.Source = source
-	current.Expires = plugin.now().Add(lifetime).Unix()
+	current.Expires = 0
+	current.RetryAt = plugin.now().Add(invitationRetryDelay).Unix()
 	current.Pending = true
 	current.JoinRequest = true
 	current.URL = ""
 	current.Revoked = false
-	// Persist creation intent before the request: a lost response must keep
-	// subsequent claims blocked until this invitation's validity window expires.
+	// Persist retry timing before the request: a lost response delays another
+	// creation attempt while ownership continues to restrict any untracked invitations.
 	if err := plugin.save(ctx, plugin.inviteKey(userID), current); err != nil {
 		return current, err
 	}
 	var result struct {
 		Link     string `json:"invite_link"`
 		Approval bool   `json:"creates_join_request"` // Telegram-confirmed approval mode
+		Expires  int64  `json:"expire_date"`          // Telegram-reported expiry timestamp
 	}
 	// Telegram forbids combining creates_join_request with member_limit. Admission
 	// uses the persisted claim so queued requesters cannot consume the link twice.
 	err := plugin.telegram(ctx, "createChatInviteLink", map[string]any{
 		"chat_id":              plugin.chat,
-		"expire_date":          current.Expires,
 		"creates_join_request": true,
 		"name":                 "web-" + strconv.FormatInt(userID, 10),
 	}, &result)
 	if err != nil {
-		return Invite{}, errors.New("创建邀请未确认，避免重复生成，请在 10 分钟后重试")
+		return Invite{}, errors.New("创建邀请结果未确认，请稍后重试")
 	}
 	parsed, err := url.Parse(result.Link)
-	if err != nil || !result.Approval || parsed.Scheme != "https" || parsed.Host != "t.me" || parsed.User != nil || !strings.HasPrefix(parsed.Path, "/+") || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || !result.Approval || result.Expires != 0 || parsed.Scheme != "https" || parsed.Host != "t.me" || parsed.User != nil || !strings.HasPrefix(parsed.Path, "/+") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return Invite{}, errors.New("Telegram 返回了无效邀请")
 	}
 	current.URL = result.Link
 	current.Pending = false
+	current.RetryAt = 0
 	if err := plugin.save(ctx, plugin.inviteKey(userID), current); err != nil {
 		// The pending record remains authoritative when saving the URL fails.
 		// Attempt revocation so the untracked link cannot accumulate usable requests.
@@ -193,22 +204,33 @@ func (plugin *Plugin) issue(ctx context.Context, userID int64, source string) (I
 	}
 	// Invitation persistence determines claim success. Event storage is diagnostic,
 	// so failure to append an event does not discard the issued invitation.
-	_ = plugin.event(ctx, "生成入群邀请", "网站账号 "+strconv.FormatInt(userID, 10)+"，有效期 10 分钟。")
+	_ = plugin.event(ctx, "生成入群邀请", bindingDetail(current)+"，专属群邀请已生成。")
 	return current, nil
 }
 
+// revoke invalidates a known group invitation and persists cleanup progress.
+// Callers hold plugin.mu; failed revocation remains pending for polling retries.
+// Permanent invitations require Telegram to confirm revocation before local completion.
+//
+// An already expired legacy invitation can complete cleanup after an API error
+// because its stored expiry prevents future joins. Zero expiry identifies a
+// permanent invitation, so failed cleanup of those records remains retryable.
 func (plugin *Plugin) revoke(ctx context.Context, current *Invite) error {
 	if current.URL == "" {
 		return errors.New("邀请创建结果待确认，无法手动撤销")
 	}
+	// Persist cleanup intent before contacting Telegram so a crash or network
+	// error leaves a durable retry for invitations that remain valid indefinitely.
 	current.Revoke = true
 	if err := plugin.save(ctx, plugin.inviteKey(current.UserID), current); err != nil {
 		return err
 	}
 	if err := plugin.telegram(ctx, "revokeChatInviteLink", map[string]any{"chat_id": plugin.chat, "invite_link": current.URL}, nil); err != nil {
-		if current.Expires > plugin.now().Unix() {
+		if current.Expires == 0 || current.Expires > plugin.now().Unix() {
 			return err
 		}
+		// A legacy invitation with a positive past expiry cannot accept joins.
+		// Complete its local cleanup while permanent invitations continue retrying errors above.
 	}
 	current.Revoke = false
 	current.Revoked = true
@@ -277,7 +299,7 @@ func (plugin *Plugin) resolveJoin(ctx context.Context, userID int64) error {
 		if err := plugin.revoke(ctx, &current); err != nil {
 			// Admission is already consumed. The durable revocation flag lets polling
 			// retry cleanup while subsequent requests continue to be declined locally.
-			return plugin.event(ctx, "批准了入群请求", bindingDetail(current)+" 已获批准，临时邀请撤销将在后台重试。")
+			return plugin.event(ctx, "批准了入群请求", bindingDetail(current)+" 已获批准，群邀请撤销将在后台重试。")
 		}
 	}
 	return plugin.event(ctx, "批准了入群请求", bindingDetail(current)+" 已通过账号绑定核验。")

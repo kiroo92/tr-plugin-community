@@ -166,6 +166,9 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 			f.t.Error(err)
 		}
+		if input["expire_date"] != nil {
+			f.t.Error("group invitation must omit expiry")
+		}
 		if input["member_limit"] != nil || input["creates_join_request"] != true {
 			f.t.Error("invitation must require approval and omit member_limit")
 		}
@@ -292,7 +295,7 @@ func TestPersistenceAndIsolation(t *testing.T) {
 	if err := first.plugin.save(ctx, "settings", first.plugin.settings); err != nil {
 		t.Fatal(err)
 	}
-	invite := Invite{UserID: 9, URL: "https://t.me/+persist", Expires: first.clock.Add(lifetime).Unix()}
+	invite := Invite{UserID: 9, URL: "https://t.me/+persist", Expires: first.clock.Add(time.Hour).Unix()}
 	if err := first.plugin.save(ctx, first.plugin.inviteKey(9), invite); err != nil {
 		t.Fatal(err)
 	}
@@ -545,14 +548,14 @@ func TestApprovalOutcomes(t *testing.T) {
 
 // TestLegacyInvitationReplacement loads an ordinary link saved by an earlier
 // version. It must be revoked before replacement, and subsequent claims reuse
-// the existing approval invitation until it expires or becomes unavailable.
+// the permanent approval invitation until it is used or explicitly revoked.
 func TestLegacyInvitationReplacement(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	f.plugin.settings.Invites = true
 	legacy := f.bindAccount(777)
 	legacy.URL = "https://t.me/+legacy"
-	legacy.Expires = f.clock.Add(lifetime).Unix()
+	legacy.Expires = f.clock.Add(time.Hour).Unix()
 	if err := f.plugin.save(ctx, f.plugin.inviteKey(9), legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -682,7 +685,7 @@ func TestUncertainCreationAndValidation(t *testing.T) {
 	if f.calls["createChatInviteLink"] != 1 {
 		t.Fatal("uncertain creation duplicated")
 	}
-	f.clock = f.clock.Add(11 * time.Minute)
+	f.clock = f.clock.Add(invitationRetryDelay + time.Second)
 	if _, err := f.plugin.issue(context.Background(), 9, "test eligibility"); err != nil {
 		t.Fatal(err)
 	}
