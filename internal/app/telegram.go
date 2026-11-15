@@ -11,6 +11,29 @@ import (
 	"strconv"
 )
 
+// telegram.go exchanges Bot API messages and routes group updates to invitation,
+// assistant, and channel handlers. The configured bot needs invitation rights,
+// and public groups need group approval to restrict their public entry. Updates
+// contain optional invitation attribution, which admission checks against stored
+// website claims. The polling loop serializes these operations with HTTP calls.
+//
+// Response parsing distinguishes a validated client rejection from an uncertain
+// transport or server outcome. Admission uses that distinction to decide whether
+// a consumed claim may be released. Polling retries persisted revocations before
+// handling further updates, while offsets retain progress across process restarts
+// and prevent replay of assistant requests whose external effects are uncertain.
+
+// telegramRejection identifies a validated Bot API refusal of a request.
+type telegramRejection struct {
+	method string // rejected API method
+	code   int    // Telegram HTTP status
+}
+
+// Error returns a diagnostic that excludes request credentials and payloads.
+func (err *telegramRejection) Error() string {
+	return fmt.Sprintf("Telegram %s 失败（%d），检查机器人权限或稍后重试", err.method, err.code)
+}
+
 func decodeRecord(raw string, target any) error {
 	if json.Unmarshal([]byte(raw), target) != nil {
 		return errors.New("插件数据损坏")
@@ -42,6 +65,14 @@ func (plugin *Plugin) telegram(ctx context.Context, method string, input any, ta
 	return plugin.telegramResult(ctx, method, response, target)
 }
 
+// telegramResult decodes a bounded Bot API response and records requested cooldowns.
+// The caller owns response.Body and closes it after parsing. Successful results
+// populate target when supplied, while malformed or oversized bodies return errors.
+//
+// A matching client status and Telegram error code produce telegramRejection,
+// allowing admission to release a rejected claim. Server errors, contradictory
+// responses, and incomplete bodies leave the outcome uncertain because callers
+// cannot infer whether Telegram performed the requested operation.
 func (plugin *Plugin) telegramResult(ctx context.Context, method string, response *http.Response, target any) error {
 	raw, err := io.ReadAll(io.LimitReader(response.Body, 2<<20+1))
 	if err != nil || len(raw) > 2<<20 {
@@ -60,9 +91,14 @@ func (plugin *Plugin) telegramResult(ctx context.Context, method string, respons
 	}
 	if !result.OK || response.StatusCode != 200 {
 		if result.Parameters.Retry > 0 {
+			// Persist Telegram's retry interval so HTTP and background callers share
+			// the same cooldown across process restarts and avoid repeated rate-limit requests.
 			if err := plugin.save(ctx, plugin.scoped("retry"), plugin.now().Unix()+result.Parameters.Retry); err != nil {
 				return err
 			}
+		}
+		if !result.OK && result.Code == response.StatusCode && result.Code >= 400 && result.Code < 500 {
+			return &telegramRejection{method: method, code: result.Code}
 		}
 		return fmt.Errorf("Telegram %s 失败（%d），检查机器人权限或稍后重试", method, response.StatusCode)
 	}
@@ -151,6 +187,8 @@ type Message struct {
 	From  TGUser   `json:"from"`
 	Reply *Message `json:"reply_to_message"`
 }
+
+// Update carries Telegram messages, membership changes, and optional join attribution.
 type Update struct {
 	ID      int64    `json:"update_id"`
 	Message *Message `json:"message"`
@@ -173,13 +211,23 @@ type Update struct {
 		From struct {
 			ID int64 `json:"id"`
 		} `json:"from"`
-		// ChatJoinRequest.invite_link 是 ChatInviteLink 对象，不是字符串。
+		// Invite contains Telegram's optional invitation attribution. Link stays empty
+		// when the join request arrives through a public entry without an invite.
 		Invite struct {
 			Link string `json:"invite_link"`
 		} `json:"invite_link"`
 	} `json:"chat_join_request"`
 }
 
+// poll processes one batch of Telegram updates for the configured group.
+// The caller holds plugin.mu so admission, HTTP claims, and offset writes run
+// in one sequence. Bot permissions are refreshed periodically and persisted
+// revocations are retried before accepting another batch.
+//
+// Membership events consume matching invitations, and join requests delegate
+// admission to resolveJoin. Assistant messages advance the offset before their
+// external effects; other updates advance it after handling so interrupted work
+// can be reconsidered on the next poll.
 func (plugin *Plugin) poll(ctx context.Context) error {
 	var bot Bot
 	found, err := plugin.load(ctx, plugin.scoped("bot"), &bot)
@@ -188,6 +236,8 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 	}
 	if !found || plugin.checkedAt == 0 || plugin.now().Unix()-plugin.checkedAt >= 300 {
 		if err := plugin.checkBot(ctx); err != nil {
+			// A failed refresh invalidates the remembered permission check. The next
+			// poll retries verification before admitting users or handling assistant messages.
 			plugin.checkedAt = 0
 			return err
 		}
@@ -213,6 +263,8 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 				return err
 			}
 			if found {
+				// Membership is already effective in Telegram. Persist consumption before
+				// cleanup so a failed revocation cannot restore this website account's eligibility.
 				current.Used = true
 				current.Revoke = true
 				if err := plugin.save(ctx, plugin.inviteKey(current.UserID), current); err != nil {
@@ -222,8 +274,8 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 			}
 		}
 		if update.Join != nil && strconv.FormatInt(update.Join.Chat.ID, 10) == plugin.chat {
-			// 群级审批覆盖邀请链接时，按请求携带的链接判定：插件签发的批准，
-			// 其余（公开入口、直接加入、过期链接）拒绝。
+			// Admission consumes a persisted website claim before approving a request.
+			// Missing invitation attribution is declined because public-entry requests cannot identify a claim.
 			if err := plugin.resolveJoin(ctx, update.Join.From.ID, update.Join.Invite.Link); err != nil {
 				if eventErr := plugin.event(ctx, "处理入群请求失败", err.Error()); eventErr != nil {
 					return eventErr
@@ -231,7 +283,8 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 			}
 		}
 		if update.Message != nil && strconv.FormatInt(update.Message.Chat.ID, 10) == plugin.chat && !update.Message.From.Bot && update.Message.Date >= plugin.now().Unix()-120 && len(update.Message.Text) <= 12000 {
-			// shortcut: 发送前推进 offset 避免崩溃重复回复；发送中崩溃可能漏一条，Telegram 不提供幂等键。
+			// Persist progress before model calls because Telegram replies have no
+			// idempotency key; a crash can omit a reply but cannot replay this request.
 			if err := plugin.save(ctx, plugin.scoped("offset"), update.ID+1); err != nil {
 				return err
 			}
@@ -241,6 +294,8 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 				}
 			}
 		}
+		// Non-assistant handlers have finished before progress is persisted. Their
+		// durable invitation flags remain available if offset persistence requires another poll.
 		offset = update.ID + 1
 		if err := plugin.save(ctx, plugin.scoped("offset"), offset); err != nil {
 			return err

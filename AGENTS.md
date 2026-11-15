@@ -10,5 +10,5 @@
 - 重型命令串行并设置 GOMAXPROCS=2、GOFLAGS=-p=1、GOMEMLIMIT=1GiB。
 - 任务恢复见 TODO.md；正式运行、备份和限制见 README.md。
 - Windows 使用 ./build.ps1 完成测试、前端构建、五平台纯 Go 编译与 SDK 包校验；Go 竞态检测需要额外 C 编译器，结果与未验证范围见 VERIFICATION.md。
-- 群组支持公开或私有超级群组。用户实测：公开群开启群级审批后，连邀请链接也要审批。据此采用「审批 + 链接白名单」：机器人订阅 chat_join_request，用其中的 ChatInviteLink.invite_link 反查插件记录，匹配未使用/未过期/未撤销的链接则 approveChatJoinRequest（先标记已使用再批准，失败回滚），其余一律 decline。公开群因此必须开启审批，否则任何人可直接用 @用户名 进群，管理端显示「未开审批，无门禁」。检查连接把 username/join_by_request 存为 GroupState 供前端提示。
+- 群组支持公开或私有超级群组。邀请使用 creates_join_request=true，省略与其互斥的 member_limit；每条链接最多自动批准一人。机器人按 chat_join_request 中可选的 ChatInviteLink.invite_link 反查领取记录，先持久化已使用与待撤销，再批准并撤销；有效的 4xx 拒绝响应允许回滚使用标记，网络或服务端结果不明时保持锁定。缺少链接、未匹配、旧版普通链接和不可用邀请分别拒绝并记录原因。旧普通链接在用户页隐藏，重新领取时先撤销再替换。公开群须开启群级审批以限制 @用户名 直接加入。检查连接把 username/join_by_request 存为 GroupState 供前端提示。
 - 公共渠道数据通过 Host.Catalog.Models（catalog.read）读取，不抓取宿主私有接口。后台每 5 秒轮询，关闭领取后仍处理旧邀请事件；Shutdown 取消并等待退出后关闭数据库。

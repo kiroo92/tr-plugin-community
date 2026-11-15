@@ -12,6 +12,18 @@ import (
 	"github.com/TokenFlux/TokenRouter/plugin-sdk/go/sdk"
 )
 
+// http.go exposes authenticated community status, invitation claims, and
+// administrator controls through the plugin's declared routes. Host caller
+// metadata determines user and administrator access. Responses reveal usable
+// invitation URLs to eligible claimants, while administrator lists omit URLs and
+// status reads hide ordinary links that require replacement after an upgrade.
+//
+// Each request attempts the same mutex used by polling. Busy requests return a
+// conflict so external calls and invitation mutations run in one sequence.
+// Settings are persisted before publication in memory, and diagnostics follow
+// successful mutations. Image delivery requires eligibility or administrator
+// access and returns encoded image bytes through the authenticated plugin API.
+
 func problem(writer http.ResponseWriter, status int, err error) {
 	sdk.WriteJSON(writer, status, map[string]string{"message": err.Error()})
 }
@@ -23,6 +35,13 @@ func (plugin *Plugin) Handler() http.Handler {
 	return mux
 }
 
+// serve dispatches a declared community route after authenticating its caller.
+// Administrator paths require the host's admin role. Busy requests return a
+// conflict so callers can retry after polling or another HTTP request finishes.
+//
+// The shared mutex covers stored claims and configuration throughout dispatch.
+// Status responses hide unusable and legacy invitation URLs, letting the user
+// request a replacement while issue retains the stored URL needed for revocation.
 func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "private, no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -36,6 +55,8 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 		problem(writer, 403, errors.New("需要管理员权限"))
 		return
 	}
+	// Polling also holds this mutex across external calls. Reject busy HTTP
+	// requests so invitation consumption and replacement cannot interleave with approval.
 	if !plugin.mu.TryLock() {
 		problem(writer, 409, errors.New("正在处理社群请求，请稍后重试"))
 		return
@@ -79,7 +100,11 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 				return
 			}
 		}
-		if source == "" || !plugin.settings.Invites || current.Used || current.Revoked || current.Revoke || current.Expires <= plugin.now().Unix() {
+		// Hide ordinary links from earlier versions so the page offers replacement.
+		// Keep their stored URLs available to issue for revocation before replacement.
+		if source == "" || !plugin.settings.Invites || !current.JoinRequest ||
+			current.Used || current.Revoked || current.Revoke ||
+			current.Expires <= plugin.now().Unix() {
 			current.URL = ""
 		}
 		sdk.WriteJSON(writer, 200, map[string]any{"eligible": source != "", "source": source, "linuxdo": qualification.LinuxDO, "recharge": qualification.Recharge, "enabled": plugin.settings.Invites && plugin.token != "", "group": plugin.settings.Group, "invite": current, "ai": plugin.settings.AI, "name": plugin.settings.Name, "channels": plugin.settings.Channels, "keywords": plugin.settings.Keywords, "public": group.Public, "approval": group.Approval, "now": plugin.now().Unix()})
@@ -137,6 +162,7 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 		}
 		next := int64(0)
 		if len(records) > 50 {
+			// The extra record signals another page of invitations.
 			records = records[:50]
 			next = records[len(records)-1].UserID
 		}
@@ -154,11 +180,15 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 			problem(writer, 400, err)
 			return
 		}
+		// Publish settings after persistence so a failed save leaves the running
+		// plugin consistent with the configuration that will be loaded after restart.
 		if err := plugin.save(ctx, "settings", input); err != nil {
 			problem(writer, 500, err)
 			return
 		}
 		plugin.settings = input
+		// Settings are already committed and published. Event storage failure does
+		// not reverse the configuration or turn a completed update into a retry.
 		_ = plugin.event(ctx, "社群配置已保存", "邀请、助手与播报设置已生效。")
 		sdk.WriteJSON(writer, 200, map[string]bool{"saved": true})
 	case "/admin/revoke":
@@ -185,6 +215,8 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 			problem(writer, 500, errors.New("清理上下文失败"))
 			return
 		}
+		// Context deletion has already committed. Its diagnostic event can fail
+		// independently because repeating the deletion does not restore conversation content.
 		_ = plugin.event(ctx, "已清理 AI 上下文", "已删除当前群组保存的对话正文。")
 		sdk.WriteJSON(writer, 200, map[string]bool{"cleared": true})
 	case "/admin/check":

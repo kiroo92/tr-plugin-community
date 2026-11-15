@@ -23,23 +23,40 @@ import (
 	"github.com/TokenFlux/TokenRouter/plugin-sdk/go/sdk"
 )
 
+// plugin_test.go exercises plugin persistence, HTTP permissions, and external
+// effects using isolated SQLite directories and local API fixtures. Invitation
+// scenarios route serialized Telegram updates through polling and verify actual
+// approved users, durable consumption, and recovery after process restart.
+//
+// The Telegram fixture records admissions separately from returned responses so
+// a connection loss can represent an operation that succeeded remotely. Restart
+// scenarios reopen the same database and resume revocation, which checks that
+// link consumption survives both an unavailable API and a fresh plugin process.
+// Model and catalog fixtures exercise unrelated plugin features locally; these
+// tests make no requests to a real Telegram group or model endpoint.
+
+// fixture connects one plugin to isolated storage and controllable remote APIs.
 type fixture struct {
-	t             *testing.T
-	host          *plugintest.Harness
-	plugin        *Plugin
-	server        *httptest.Server
-	clock         time.Time
-	linux         bool
-	orders        []*pluginpb.Order
-	catalog       []byte
-	catalogError  bool
-	updates       []Update
-	calls         map[string]int
-	fail          string
-	modelBody     map[string]any
-	groupType     string
-	groupName     string
-	joinByRequest bool
+	t                *testing.T
+	host             *plugintest.Harness
+	plugin           *Plugin
+	server           *httptest.Server
+	clock            time.Time
+	linux            bool
+	orders           []*pluginpb.Order
+	catalog          []byte
+	catalogError     bool
+	updates          []Update
+	calls            map[string]int
+	fail             string
+	failStatus       int           // injected failure status
+	loseApproval     bool          // drop successful approval response
+	admitted         []int64       // users admitted by fixture
+	approvalFinished chan struct{} // dropped response handler completion
+	modelBody        map[string]any
+	groupType        string
+	groupName        string
+	joinByRequest    bool
 }
 
 func setup(t *testing.T) *fixture {
@@ -113,11 +130,19 @@ func (f *fixture) restart() {
 		}
 	})
 }
+
+// remote serves local Telegram and model responses and records external effects.
+// Tests serialize calls through the plugin and configure failures before sending
+// requests, including successful approvals whose responses are lost in transit.
 func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 	method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
 	f.calls[method]++
 	if method == f.fail {
-		sdk.WriteJSON(writer, 500, map[string]any{"ok": false, "error_code": 500})
+		status := f.failStatus
+		if status == 0 {
+			status = http.StatusInternalServerError
+		}
+		sdk.WriteJSON(writer, status, map[string]any{"ok": false, "error_code": status})
 		return
 	}
 	var result any = true
@@ -139,12 +164,36 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 			f.t.Error(err)
 		}
-		if input["member_limit"] != float64(1) || input["creates_join_request"] != nil {
-			f.t.Error("must create direct single-member invite")
+		if input["member_limit"] != nil || input["creates_join_request"] != true {
+			f.t.Error("invitation must require approval and omit member_limit")
 		}
 		result = map[string]string{"invite_link": fmt.Sprintf("https://t.me/+test%d", f.calls[method])}
 	case "getUpdates":
 		result = f.updates
+	case "approveChatJoinRequest":
+		var input struct {
+			UserID int64 `json:"user_id"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			f.t.Error(err)
+		}
+		f.admitted = append(f.admitted, input.UserID)
+		if f.loseApproval {
+			// Signal handler completion independently of the lost network response so
+			// tests can synchronize fixture mutations before issuing the next request.
+			defer close(f.approvalFinished)
+			// Commit the admission before closing the connection. The client sees
+			// a network failure even though the first requester already entered.
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				f.t.Error(err)
+				return
+			}
+			if err := connection.Close(); err != nil {
+				f.t.Error(err)
+			}
+			return
+		}
 	case "declineChatJoinRequest":
 		var input map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
@@ -319,6 +368,9 @@ func TestInvitationsAndPermissions(t *testing.T) {
 	mustStatus(t, f.request("GET", "/status", "", "user"), 502)
 }
 
+// TestPublicGroupAndJoinRequests processes two requesters using one public-group
+// invitation in the same poll. Exactly one admission survives revocation failure
+// and restart, while unrelated links remain rejected.
 func TestPublicGroupAndJoinRequests(t *testing.T) {
 	f := setup(t)
 	f.plugin.settings.Invites = true
@@ -335,47 +387,211 @@ func TestPublicGroupAndJoinRequests(t *testing.T) {
 	if !group.Public || group.Username != "moonup_chat" || !group.Approval {
 		t.Fatalf("公开群与审批状态未记录: %+v", group)
 	}
-	// 公开群 + 群级审批：机器人链接仍可直接创建并领取。
 	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
 	var current Invite
 	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &current); err != nil {
 		t.Fatal(err)
 	}
-	// 使用插件链接的审批请求应被批准，并登记为已使用。
 	raw := fmt.Sprintf(`{"update_id":300,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":777},"invite_link":{"invite_link":%q}}}`, current.URL)
 	var update Update
 	if err := json.Unmarshal([]byte(raw), &update); err != nil {
 		t.Fatal(err)
 	}
-	f.updates = []Update{update}
+	var second Update
+	if err := json.Unmarshal([]byte(strings.ReplaceAll(raw, `"id":777`, `"id":778`)), &second); err != nil {
+		t.Fatal(err)
+	}
+	second.ID = 301
+	// Keep the Telegram link active after the first approval. Durable consumption
+	// must still reject another requester whose update is already queued locally.
+	f.fail = "revokeChatInviteLink"
+	f.updates = []Update{update, second}
 	if err := f.plugin.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["approveChatJoinRequest"] != 1 {
-		t.Fatal("领取链接的入群请求未批准")
+	if f.calls["approveChatJoinRequest"] != 1 || len(f.admitted) != 1 || f.admitted[0] != 777 || f.calls["declineChatJoinRequest"] != 1 {
+		t.Fatalf("one link admitted multiple users: %v", f.admitted)
 	}
 	var after Invite
 	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &after); err != nil {
 		t.Fatal(err)
 	}
-	if !after.Used {
-		t.Fatal("批准后应标记邀请已使用")
+	if !after.Used || !after.Revoke || after.Revoked {
+		t.Fatalf("admission must remain consumed while revocation is pending: %+v", after)
 	}
-	// 不带插件链接的请求（公开入口直接加入或已撤销链接）自动拒绝。
+	f.fail = ""
+	f.restart()
+	second.ID = 302
+	f.updates = []Update{second}
+	if err := f.plugin.poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.admitted) != 1 || f.calls["declineChatJoinRequest"] != 2 {
+		t.Fatal("restart released an already consumed invitation")
+	}
 	direct := Update{}
-	if err := json.Unmarshal([]byte(`{"update_id":301,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":888},"invite_link":{"invite_link":"https://t.me/+other"}}}`), &direct); err != nil {
+	if err := json.Unmarshal([]byte(`{"update_id":303,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":888},"invite_link":{"invite_link":"https://t.me/+other"}}}`), &direct); err != nil {
 		t.Fatal(err)
 	}
 	f.updates = []Update{direct}
 	if err := f.plugin.poll(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["declineChatJoinRequest"] != 1 {
+	if f.calls["declineChatJoinRequest"] != 3 {
 		t.Fatal("非插件链接的入群请求未拒绝")
 	}
-	// 普通群仍被拒绝。
 	f.groupType = "group"
 	mustStatus(t, f.request("POST", "/admin/check", "", "admin"), 502)
+}
+
+// TestApprovalOutcomes protects the consumed claim when Telegram's result is
+// uncertain. A definite rejection permits retry, while lost responses and server
+// failures cannot admit another person after reopening the database.
+func TestApprovalOutcomes(t *testing.T) {
+	for _, scenario := range []struct {
+		name         string
+		status       int
+		lostResponse bool
+		consumed     bool
+	}{
+		{name: "definite rejection", status: 400},
+		{name: "server failure", status: 500, consumed: true},
+		{name: "response lost after admission", lostResponse: true, consumed: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			current, err := f.plugin.issue(ctx, 9, "test eligibility")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario.status != 0 {
+				f.fail = "approveChatJoinRequest"
+				f.failStatus = scenario.status
+			}
+			f.loseApproval = scenario.lostResponse
+			if scenario.lostResponse {
+				f.approvalFinished = make(chan struct{})
+			}
+			if err := f.plugin.resolveJoin(ctx, 777, current.URL); err == nil {
+				t.Fatal("approval failure was not reported")
+			}
+			if scenario.lostResponse {
+				// Network EOF can arrive before the handler returns. Wait for its
+				// completion signal before reading admissions or changing remote failure controls.
+				select {
+				case <-f.approvalFinished:
+				case <-time.After(2 * time.Second):
+					t.Fatal("lost-response handler did not finish")
+				}
+			}
+			var saved Invite
+			if _, err := f.plugin.load(ctx, f.plugin.inviteKey(9), &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Used != scenario.consumed || saved.Revoke != scenario.consumed {
+				t.Fatalf("unexpected admission claim: %+v", saved)
+			}
+			f.fail = ""
+			f.loseApproval = false
+			f.restart()
+			if err := f.plugin.resolveJoin(ctx, 778, current.URL); err != nil {
+				t.Fatal(err)
+			}
+			if len(f.admitted) > 1 {
+				t.Fatalf("one invitation admitted multiple people: %v", f.admitted)
+			}
+			if scenario.consumed {
+				if f.calls["approveChatJoinRequest"] != 1 || f.calls["declineChatJoinRequest"] != 1 {
+					t.Fatal("uncertain approval released the invitation")
+				}
+			} else if len(f.admitted) != 1 || f.admitted[0] != 778 {
+				t.Fatal("definite rejection did not permit a later admission")
+			}
+		})
+	}
+}
+
+// TestLegacyInvitationReplacement loads an ordinary link saved by an earlier
+// version. It must be revoked before replacement, and subsequent claims reuse
+// the existing approval invitation until it expires or becomes unavailable.
+func TestLegacyInvitationReplacement(t *testing.T) {
+	f := setup(t)
+	ctx := context.Background()
+	f.plugin.settings.Invites = true
+	legacy := Invite{UserID: 9, URL: "https://t.me/+legacy", Expires: f.clock.Add(lifetime).Unix()}
+	if err := f.plugin.save(ctx, f.plugin.inviteKey(9), legacy); err != nil {
+		t.Fatal(err)
+	}
+	response := f.request("GET", "/status", "", "user")
+	mustStatus(t, response, 200)
+	var status struct {
+		Invite Invite `json:"invite"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Invite.URL != "" {
+		t.Fatal("status exposed a legacy invitation URL")
+	}
+	f.fail = "revokeChatInviteLink"
+	if _, err := f.plugin.issue(ctx, 9, "test eligibility"); err == nil {
+		t.Fatal("legacy replacement ignored revocation failure")
+	}
+	if f.calls["createChatInviteLink"] != 0 {
+		t.Fatal("replacement was issued before the ordinary link was revoked")
+	}
+	f.fail = ""
+	if err := f.plugin.retryRevokes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	current, err := f.plugin.issue(ctx, 9, "test eligibility")
+	if err != nil || !current.JoinRequest || current.URL == legacy.URL {
+		t.Fatal("legacy link was not replaced with an approval invitation", err)
+	}
+	if _, err := f.plugin.issue(ctx, 9, "test eligibility"); err != nil {
+		t.Fatal(err)
+	}
+	if f.calls["createChatInviteLink"] != 1 {
+		t.Fatal("active approval invitation was not reused")
+	}
+}
+
+// TestJoinRequestDiagnostics checks missing attribution, unknown links, and old
+// invitation modes. Each request is declined with a distinct diagnostic while
+// preserving the website account's unused admission claim.
+func TestJoinRequestDiagnostics(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		link   string
+		legacy bool
+		detail string
+	}{
+		{name: "missing", detail: "未携带邀请链接"},
+		{name: "unknown", link: "https://t.me/+unknown", detail: "未匹配到网站领取记录"},
+		{name: "legacy", link: "https://t.me/+legacy", legacy: true, detail: "旧版链接模式"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := setup(t)
+			ctx := context.Background()
+			if scenario.legacy {
+				legacy := Invite{UserID: 9, URL: scenario.link, Expires: f.clock.Add(lifetime).Unix()}
+				if err := f.plugin.save(ctx, f.plugin.inviteKey(9), legacy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.plugin.resolveJoin(ctx, 777, scenario.link); err != nil {
+				t.Fatal(err)
+			}
+			var events []Event
+			if _, err := f.plugin.load(ctx, f.plugin.scoped("events"), &events); err != nil {
+				t.Fatal(err)
+			}
+			if f.calls["approveChatJoinRequest"] != 0 || f.calls["declineChatJoinRequest"] != 1 || len(events) != 1 || !strings.Contains(events[0].Detail, scenario.detail) {
+				t.Fatalf("unexpected rejection diagnostic: %+v", events)
+			}
+		})
+	}
 }
 
 func TestStatusReportsEachCondition(t *testing.T) {

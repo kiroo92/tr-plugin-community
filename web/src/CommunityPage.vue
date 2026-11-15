@@ -2,6 +2,19 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { TrButton, useHost } from '@tokenflux/tokenrouter-plugin-sdk'
 
+// CommunityPage.vue presents website invitation claims and the community's
+// administrator controls. The host route selects the user or administrator
+// view, and host requests retain authentication while the component tracks
+// loading, validation failures, and the invitation's remaining lifetime. User
+// copy describes automatic approval and the consumed eligibility state, which
+// can also require administrator review after an uncertain Telegram response.
+//
+// Administrator drafts cover invitations, the assistant, and channel broadcasts.
+// Requests share an abort controller that is cancelled on unmount, alongside
+// cleanup of the countdown timer. Channel previews load through authenticated
+// requests and display in a dialog after rendering, keeping image retrieval
+// subject to the plugin's user and administrator permission checks.
+
 interface Settings { invites:boolean; group:string; ai:boolean; name:string; aliases:string; endpoint:string; model:string; persona:string; mention:boolean; reply:boolean; named:boolean; turns:number; rate:number; output:number; budget:number; channels:boolean; interval:number; keywords:string; cooldown:number }
 interface Invite { user_id:number; url?:string; expires:number; created:number; used:boolean; revoked:boolean; revoke:boolean; pending:boolean; source:string }
 interface Group { id:number; name:string; availability?:{ availability_rate?:number; last_status?:string; last_checked_at?:string } }
@@ -70,16 +83,16 @@ onBeforeUnmount(()=>{controller.abort();clearInterval(timer)})
      <ul class="cm-facts"><li>限 1 人使用</li><li>10 分钟有效</li><li>入群后自动撤销</li><li v-if="status.public">本链接经审批自动通过</li></ul>
     </div>
     <div class="cm-invite-area">
-     <div class="cm-invite-head"><h2>{{ status.invite.used?'你已使用入群资格':'领取你的入群邀请' }}</h2><span class="cm-pill" :class="!status.enabled?'cm-warn':status.invite.used?'cm-ok':status.eligible?'cm-brand':''">{{ !status.enabled?'暂未开放':status.invite.used?'已入群':status.eligible?'可领取':'未达标' }}</span></div>
+     <div class="cm-invite-head"><h2>{{ status.invite.used?'你已使用入群资格':'领取你的入群邀请' }}</h2><span class="cm-pill" :class="!status.enabled?'cm-warn':status.invite.used?'cm-ok':status.eligible?'cm-brand':''">{{ !status.enabled?'暂未开放':status.invite.used?'资格已使用':status.eligible?'可领取':'未达标' }}</span></div>
      <p v-if="!status.enabled">管理员尚未开放邀请领取，请稍后再来。</p>
-     <p v-else-if="status.invite.used">邀请链接已撤销，欢迎加入。</p>
+     <p v-else-if="status.invite.used">邀请已使用或已锁定。如尚未入群，请联系管理员核实。</p>
      <template v-else-if="status.invite.url && remaining>0">
-      <p>打开下方链接即可加入群组，剩余 {{ Math.floor(remaining/60) }}:{{ String(remaining%60).padStart(2,'0') }}，请勿转发。</p>
+      <p>打开下方链接申请入群，机器人将自动批准首位申请者。剩余 {{ Math.floor(remaining/60) }}:{{ String(remaining%60).padStart(2,'0') }}，请勿转发。</p>
       <input class="cm-link" readonly :value="status.invite.url" aria-label="入群邀请链接">
       <div class="cm-actions"><a class="cm-primary" :href="status.invite.url" target="_blank" rel="noopener noreferrer">打开 Telegram 加入 ↗</a><TrButton @click="copy">复制链接</TrButton><span><small>链接可被转发，无法限定本人使用。</small></span></div>
      </template>
      <template v-else>
-      <p>{{ status.invite.pending&&remaining>0?'上次创建结果待确认，请在有效期结束后重试。':'生成一条限 1 人、10 分钟内有效的链接，打开 Telegram 即可入群。' }}</p>
+      <p>{{ status.invite.pending&&remaining>0?'上次创建结果待确认，请在有效期结束后重试。':'领取一条限 1 人、10 分钟内有效的邀请，提交申请后由机器人自动审批。' }}</p>
       <div class="cm-actions"><button class="cm-primary" :disabled="busy||!status.enabled||!status.eligible||status.invite.used||status.invite.revoke||(status.invite.pending&&remaining>0)" @click="claim">{{ busy?'处理中…':status.invite.expires?'重新领取邀请':'领取入群链接' }} <span aria-hidden="true">↗</span></button><span><small>{{ status.eligible?'无需绑定 Telegram 账号':'完成任一条件后即可领取' }}</small></span></div>
      </template>
     </div>
@@ -109,7 +122,7 @@ onBeforeUnmount(()=>{controller.abort();clearInterval(timer)})
    <div class="cm-two"><article class="cm-card"><h2>功能运行状态</h2><div v-for="item in [{name:'邀请领取',enabled:settings.invites,tab:'invites'},{name:'AI 群聊助手',enabled:settings.ai,tab:'ai'},{name:'渠道状态播报',enabled:settings.channels,tab:'channels'}]" :key="item.name" class="cm-feature"><b>{{ item.name }}</b><span class="cm-pill" :class="item.enabled?'cm-ok':''">{{ item.enabled?'已开启':'已暂停' }}</span><button class="cm-text" @click="selectTab(item.tab as Tab)">管理 →</button></div><p>群组：{{ settings.group }}</p></article><article class="cm-card"><h2>最近运行事件</h2><p v-if="!data.events?.length">尚无运行记录。</p><ol class="cm-events"><li v-for="(event,index) in data.events" :key="index"><time>{{ date(event.at) }}</time><b>{{ event.title }}</b><p>{{ event.detail }}</p></li></ol></article></div>
   </section>
   <section v-show="tab==='invites'" id="community-panel-invites" role="tabpanel" aria-labelledby="community-tab-invites" class="cm-two">
-   <form class="cm-card" @submit.prevent="save"><h2>入群设置</h2><label class="cm-toggle"><span>开放入群领取</span><input v-model="settings.invites" type="checkbox"></label><label>群组名称<input v-model="settings.group" maxlength="40" required></label><div class="cm-alert">Bot Token 和 Chat ID 由宿主插件配置保存。机器人须为超级群组管理员并拥有邀请权限；公开群可开启入群审批，机器人链接仍可直接加入。</div><p>LinuxDO 绑定或已完成余额充值，满足任意一项。每账号成功使用一次；过期未使用可重领。</p><div class="cm-actions"><TrButton variant="primary" :loading="busy" @click="save">保存配置</TrButton><TrButton :disabled="busy||!data.configured" @click="action('/admin/check','机器人连接与邀请权限正常')">检查连接</TrButton></div></form>
+   <form class="cm-card" @submit.prevent="save"><h2>入群设置</h2><label class="cm-toggle"><span>开放入群领取</span><input v-model="settings.invites" type="checkbox"></label><label>群组名称<input v-model="settings.group" maxlength="40" required></label><div class="cm-alert">Bot Token 和 Chat ID 由宿主插件配置保存。机器人须为超级群组管理员并拥有邀请权限。每条邀请最多自动批准一人；公开群须开启群级入群审批。</div><p>LinuxDO 绑定或已完成余额充值，满足任意一项。每账号成功使用一次；过期未使用可重领。</p><div class="cm-actions"><TrButton variant="primary" :loading="busy" @click="save">保存配置</TrButton><TrButton :disabled="busy||!data.configured" @click="action('/admin/check','机器人连接与邀请权限正常')">检查连接</TrButton></div></form>
    <article class="cm-card"><h2>邀请领取记录</h2><p>显示网站账号，不绑定或展示 Telegram 身份。</p><div class="cm-table"><table><thead><tr><th>账号 ID</th><th>资格来源</th><th>状态</th><th>领取时间</th><th>操作</th></tr></thead><tbody><tr v-for="record in records" :key="record.user_id"><td>{{ record.user_id }}</td><td>{{ record.source }}</td><td>{{ inviteState(record) }}</td><td>{{ date(record.created) }}</td><td><button class="cm-text" :disabled="busy||record.revoked||record.pending||record.used" @click="revoke(record)">撤销</button></td></tr><tr v-if="!records.length"><td colspan="5">暂无领取记录。</td></tr></tbody></table></div><TrButton v-if="next" :loading="busy" @click="run(()=>loadRecords(next))">加载更多</TrButton></article>
   </section>
   <section v-show="tab==='ai'" id="community-panel-ai" role="tabpanel" aria-labelledby="community-tab-ai" class="cm-two cm-ai-grid">

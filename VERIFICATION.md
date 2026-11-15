@@ -28,10 +28,18 @@
 
 - 自建分发 v0.2.2：build.ps1 通过（10 组测试、vet、前端构建、五平台打包与逐个 validate），索引保留 0.2.1/0.2.0/0.1.0 并新增 0.2.2 签名；草稿 11 资产认证下载与本地逐一一致，验签通过、篡改被拒、manifest 哈希匹配；公开为 latest 后匿名读取 latest 来源，版本 0.2.2、验签通过，linux/amd64 包哈希一致；包内二进制确认含 approveChatJoinRequest 路径。
 
+## 单链接单人审批（v0.2.3，2026-11-15）
+
+- 创建参数改为 `creates_join_request=true`，省略 `member_limit`。邀请记录新增 `join_request` 标记，旧普通链接在领取页隐藏，重新领取时先撤销再替换。
+- 本地 HTTP 夹具验证同一批次两个请求仅批准一人、撤销失败后仍拒绝第二人、重启后保持已用名额、明确 400 拒绝后可重试，以及批准成功但连接中断时保持锁定。另覆盖旧链接撤销失败与替换、缺少链接和未匹配记录的分类事件。
+- `GOMAXPROCS=2 GOFLAGS=-p=1 GOMEMLIMIT=1GiB CGO_ENABLED=1 make test` 通过：13 组测试、`go vet ./...` 和 `go test -race ./...`。首次竞态检查发现丢失响应夹具的控制字段缺少同步，加入处理完成通知后完整重跑通过。
+- `pnpm --dir web install --frozen-lockfile` 与 `pnpm --dir web build` 通过，后者完成 Vue/TypeScript 检查和生产资源构建。改动的 Go 文件已格式化，`git diff --check` 通过。
+- 已同步使用说明、管理规则、变更记录和页面文案。此节记录实现验证；发行状态见 GitHub Release 与发行核验记录。真实 Telegram 公开群与私有群的审批回调及最终入群结果待验收。
+
 ## 未验证及限制
 
-- go test -race ./... 未完成：默认 CGO_ENABLED=0；显式启用后报 C compiler gcc not found。本机没有可用 C 编译器，未擅自安装。八组普通测试已通过，此项不能视为竞态检测通过。
+- 早期 Windows 验证因缺少 gcc 未完成竞态检查；本次 Linux 本地修改已启用 CGO 并通过完整竞态检查，见上节。
 - 未在目标真实宿主执行安装、升级、卸载/清除或备份恢复；DataDir 生命周期依据指定 SDK README，文件持久化与隔离通过 plugintest 独立目录验证。
 - 未使用真实 Telegram 群、Bot Token 或模型密钥。外部 API 由本地 HTTP fixture 验证，真实权限、网络与模型供应方兼容性仍需专用测试群验收。
 - 不提供上传功能；图片由后端生成并经过鉴权接口读取。没有修改宿主、旧绑定草稿或其他正式插件，没有部署线上服务。源码与带签名索引的安装包按用户后续要求发布到 kiroo92/tr-plugin-community。
-- 邀请无法限定本人，Telegram 人数限制与事件撤销不能提供绝对一次性保证。其它交付及数据边界见 README.md。
+- 链接可被转发，首位获准者可能是转发后的持有人。每条审批邀请最多由插件自动批准一人；管理员或其它机器人批准的结果由群组管理者负责。其它交付及数据边界见 README.md。
