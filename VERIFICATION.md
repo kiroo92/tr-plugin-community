@@ -36,6 +36,15 @@
 - `pnpm --dir web install --frozen-lockfile` 与 `pnpm --dir web build` 通过，后者完成 Vue/TypeScript 检查和生产资源构建。改动的 Go 文件已格式化，`git diff --check` 通过。
 - 已同步使用说明、管理规则、变更记录和页面文案。此节记录实现验证；发行状态见 GitHub Release 与发行核验记录。真实 Telegram 公开群与私有群的审批回调及最终入群结果待验收。
 
+## v0.2.3 发行核验（2026-11-15）
+
+- 发布地址：https://github.com/kiroo92/tr-plugin-community/releases/tag/v0.2.3。标签指向源码提交 `7178d1bfba338438fffd6d9f8c5b85b5e40794ae`，已公开为 latest。
+- `make pack` 完成 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 的纯 Go 编译、打包及 SDK validate。各包内 manifest 均为 0.2.3，二进制构建信息指向该源码提交，工作区标记为未修改。
+- 沿用已验签的历史索引，保留 0.2.2、0.2.1、0.2.0、0.1.0 并新增 0.2.3。按维护者要求轮换签名密钥，新公钥见 README；私钥位于本地发布配置目录，并保存为仓库 Actions secret `INDEX_SIGNING_KEY`。
+- SDK index sign 通过结构校验并签名；独立 Ed25519 验签通过，改动索引字节后签名被拒。草稿全部 11 个资产下载后，大小及 SHA256 与本地文件逐一一致，manifest 摘要和五个安装包条目匹配。
+- 公开后匿名下载 latest 的索引、签名及公钥，均与发布文件一致并通过验签。五个平台安装包全部匿名下载，大小和 SHA256 与签名索引一致。仓库未配置 GitHub Actions 工作流，验证在本地完成。
+- 已有来源需替换公钥后再刷新更新，升级后重新领取审批邀请。真实 Telegram 入群结果与目标宿主安装流程仍待验收。
+
 ## 未验证及限制
 
 - 早期 Windows 验证因缺少 gcc 未完成竞态检查；本次 Linux 本地修改已启用 CGO 并通过完整竞态检查，见上节。

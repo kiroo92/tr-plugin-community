@@ -17,9 +17,12 @@
 
 - [x] T8：v0.2.1 支持公开超级群组与群级入群审批。依据 Bot API join_by_request 语义移除「必须无公开用户名」限制，新增 chat_join_request 拒绝路径与测试；五平台打包、草稿核对、签名与匿名 latest 验证通过。
 
+- [x] T9：v0.2.2 入群审批按链接匹配，五平台签名发行核验完成，见 VERIFICATION.md。
+- [x] T10：v0.2.3 改用审批邀请，每条链接最多自动批准一人；13 组测试、vet、竞态检查、前端构建和五平台 validate 通过。维护者授权轮换签名密钥，11 个草稿资产核对后公开为 latest，五平台匿名下载与签名索引一致。
+
 ## 恢复点
-- 当前：T1–T5 的实现、用户要求的验证与交付文件准备完成。
-- 已验证：八组 Go 测试、go vet、SDK 来源、前端类型检查及构建、浏览器交互与主题布局。
-- 竞态限制：CGO_ENABLED=1 后仍失败，本机 PATH 无 gcc，尚未完成 -race；普通纯 Go 构建不受影响。
-- 结果：build.ps1 再次通过；五个包 validate 与 SHA256 核对通过，详见 VERIFICATION.md。
-- 后续验收范围：真实宿主/Telegram/模型联调及有 C 编译器环境的 -race；本次未部署。
+- 当前版本：v0.2.3，已公开为 latest，源码标签指向 7178d1bfba338438fffd6d9f8c5b85b5e40794ae。
+- 已验证：13 组测试、go vet、Linux CGO 竞态检查、前端类型检查与构建、五平台编译打包及 validate。
+- 分发核验：草稿 11 个资产逐一核对；公开后 latest 索引验签与五个平台匿名下载摘要一致。
+- 密钥：新公钥见 README；私钥位于用户配置目录 TokenRouter/plugin-signing/tr-plugin-community.key，并保存在仓库 Actions secret INDEX_SIGNING_KEY。已有来源须替换公钥后刷新更新。
+- 后续验收范围：真实宿主安装、升级及 Telegram 入群结果；本次发布未部署到线上宿主。
