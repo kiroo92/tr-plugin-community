@@ -24,9 +24,11 @@
 
 - [x] T12：v0.2.5 实现永久机器人专属链接、私聊 Start 自动绑定、私发群邀请及按绑定身份审批；18 组测试、竞态检查、前端与五平台打包验签通过，已公开为 latest。
 
+- [x] T13：v0.2.6 取消群邀请有效期；19 组测试、竞态检查、前端与五平台安装包校验通过，已公开为 latest，公开索引验签与五平台匿名下载摘要一致。
+
 ## 恢复点
-- 当前版本：v0.2.5，标识 moonup.community，已公开为 latest，源码标签指向 63eff8802d4539dfdb17d6ba92b05c5b2a88148d。
-- 已验证：18 组测试、go vet、Linux CGO 竞态检查、前端类型检查与构建、五平台编译打包及 validate。
+- 当前版本：v0.2.6，标识 moonup.community，已公开为 latest，源码标签指向 826930d2b9ba3adcf4ece58b64ca85713dc612a8。
+- 已验证：19 组测试、go vet、Linux CGO 竞态检查、前端类型检查与构建、五平台编译打包及 validate。
 - 分发核验：草稿 11 个资产逐一核对；公开后 latest 索引验签与五个平台匿名下载摘要一致。
 - 密钥：新公钥见 README；私钥位于用户配置目录 TokenRouter/plugin-signing/tr-plugin-community.key，并保存在仓库 Actions secret INDEX_SIGNING_KEY。已有来源须替换公钥后刷新更新。
 - 后续验收范围：新标识在真实宿主的安装及 Telegram 入群结果；本次发布未部署到线上宿主。
