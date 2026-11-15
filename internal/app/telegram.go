@@ -295,12 +295,17 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 			update.Message.Chat.ID == update.Message.From.ID && !update.Message.From.Bot &&
 			strings.HasPrefix(update.Message.Text, "/start") {
 			if err := plugin.handleStart(ctx, update.Message); err != nil {
-				// Keep this update available when binding or delivery fails. Replaying
-				// Start reuses the persisted owner and group entry after transient failures.
+				// Report the failure before deciding whether to retain this update.
+				// Persisted ownership lets a later Start resume without creating a second binding.
 				if eventErr := plugin.event(ctx, "机器人绑定处理失败", err.Error()); eventErr != nil {
 					return eventErr
 				}
-				return err
+				var rejection *telegramRejection
+				if !errors.As(err, &rejection) {
+					return err
+				}
+				// A definite refusal such as a blocked private conversation cannot be
+				// retried usefully in this batch. Advance so other users' updates still run.
 			}
 		}
 		if update.Message != nil && strconv.FormatInt(update.Message.Chat.ID, 10) == plugin.chat && !update.Message.From.Bot && update.Message.Date >= plugin.now().Unix()-120 && len(update.Message.Text) <= 12000 {

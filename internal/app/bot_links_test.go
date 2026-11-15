@@ -235,3 +235,52 @@ func TestStartGuards(t *testing.T) {
 		})
 	}
 }
+
+// TestRejectedStartDeliveryKeepsPolling processes a blocked private conversation
+// followed by another user's Start. The refusal advances its update offset,
+// while the next user still receives an invitation and both bindings persist.
+func TestRejectedStartDeliveryKeepsPolling(t *testing.T) {
+	f := setup(t)
+	f.plugin.settings.Invites = true
+	ctx := context.Background()
+	first, err := f.plugin.issueBotLink(ctx, 9, "test eligibility")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.plugin.issueBotLink(ctx, 10, "test eligibility")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var update Update
+	raw := fmt.Sprintf(`{"update_id":800,"message":{"chat":{"id":777,"type":"private"},"from":{"id":777},"text":%q}}`, "/start "+first.StartToken)
+	if err := json.Unmarshal([]byte(raw), &update); err != nil {
+		t.Fatal(err)
+	}
+	f.updates = []Update{update}
+	f.fail = "sendMessage"
+	f.failStatus = 403
+	if err := f.plugin.poll(ctx); err != nil {
+		t.Fatal("definite private refusal blocked polling", err)
+	}
+	var offset int64
+	if _, err := f.plugin.load(ctx, f.plugin.scoped("offset"), &offset); err != nil || offset != 801 {
+		t.Fatal("blocked conversation retained its update", err)
+	}
+	f.fail = ""
+	raw = fmt.Sprintf(`{"update_id":801,"message":{"chat":{"id":778,"type":"private"},"from":{"id":778},"text":%q}}`, "/start "+second.StartToken)
+	if err := json.Unmarshal([]byte(raw), &update); err != nil {
+		t.Fatal(err)
+	}
+	f.updates = []Update{update}
+	if err := f.plugin.poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.messages) != 1 || f.messages[0]["chat_id"] != float64(778) {
+		t.Fatal("another private sender did not receive its invitation")
+	}
+	for _, telegramID := range []int64{777, 778} {
+		if _, found, err := f.plugin.inviteForTelegram(ctx, telegramID); err != nil || !found {
+			t.Fatal("private delivery outcome lost a binding", err)
+		}
+	}
+}
