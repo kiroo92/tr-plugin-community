@@ -48,11 +48,12 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 	ctx := request.Context()
 	switch request.URL.Path {
 	case "/status", "/invite":
-		source, err := plugin.eligible(ctx, caller.UserID)
+		qualification, err := plugin.eligible(ctx, caller.UserID)
 		if err != nil {
 			problem(writer, 502, err)
 			return
 		}
+		source := qualification.Source
 		var current Invite
 		if _, err := plugin.load(ctx, plugin.inviteKey(caller.UserID), &current); err != nil {
 			problem(writer, 500, err)
@@ -76,11 +77,11 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 		if source == "" || !plugin.settings.Invites || current.Used || current.Revoked || current.Revoke || current.Expires <= plugin.now().Unix() {
 			current.URL = ""
 		}
-		sdk.WriteJSON(writer, 200, map[string]any{"eligible": source != "", "source": source, "enabled": plugin.settings.Invites && plugin.token != "", "group": plugin.settings.Group, "invite": current, "ai": plugin.settings.AI, "name": plugin.settings.Name, "channels": plugin.settings.Channels, "keywords": plugin.settings.Keywords, "now": plugin.now().Unix()})
+		sdk.WriteJSON(writer, 200, map[string]any{"eligible": source != "", "source": source, "linuxdo": qualification.LinuxDO, "recharge": qualification.Recharge, "enabled": plugin.settings.Invites && plugin.token != "", "group": plugin.settings.Group, "invite": current, "ai": plugin.settings.AI, "name": plugin.settings.Name, "channels": plugin.settings.Channels, "keywords": plugin.settings.Keywords, "now": plugin.now().Unix()})
 	case "/image":
 		if caller.Role != "admin" {
-			source, err := plugin.eligible(ctx, caller.UserID)
-			if err != nil || source == "" {
+			qualification, err := plugin.eligible(ctx, caller.UserID)
+			if err != nil || qualification.Source == "" {
 				problem(writer, 403, errors.New("需满足社群资格后查看"))
 				return
 			}

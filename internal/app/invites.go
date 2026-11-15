@@ -26,43 +26,59 @@ type Invite struct {
 	Source  string `json:"source"`
 }
 
-func (plugin *Plugin) eligible(ctx context.Context, userID int64) (string, error) {
+// qualification 记录满足入群资格的来源，并区分「已核验为否」与「无需核验」。
+// Recharge 为 nil 表示已由 LinuxDO 绑定满足，未再扫描订单。
+type qualification struct {
+	Source   string `json:"source"`
+	LinuxDO  bool   `json:"linuxdo"`
+	Recharge *bool  `json:"recharge"`
+}
+
+func (plugin *Plugin) eligible(ctx context.Context, userID int64) (qualification, error) {
+	var found qualification
 	user, err := plugin.env.Host.Users.Get(ctx, userID)
 	if err != nil {
-		return "", errors.New("无法读取账号状态")
+		return found, errors.New("无法读取账号状态")
 	}
 	if user.Status != "active" {
-		return "", nil
+		return found, nil
 	}
 	identities, err := plugin.env.Host.Users.Identities(ctx, userID)
 	if err != nil {
-		return "", errors.New("无法核验 LinuxDO 绑定")
+		return found, errors.New("无法核验 LinuxDO 绑定")
 	}
 	for _, identity := range identities.Identities {
 		if identity.GetProviderType() == "linuxdo" && identity.GetSubject() != "" {
-			return "LinuxDO 绑定", nil
+			found.Source = "LinuxDO 绑定"
+			found.LinuxDO = true
+			return found, nil
 		}
 	}
+	no := false
+	found.Recharge = &no
 	for page := int32(1); page <= 100; page++ {
 		result, err := plugin.env.Host.Orders.ListForUser(ctx, &pluginpb.ListUserOrdersRequest{UserId: userID, Page: page, PageSize: 50, Status: "COMPLETED"})
 		if err != nil {
-			return "", errors.New("无法核验充值订单")
+			return qualification{}, errors.New("无法核验充值订单")
 		}
 		for _, order := range result.Orders {
 			amount, valid := new(big.Rat).SetString(order.GetAmount())
 			if order.GetType() == "balance" && order.GetStatus() == "COMPLETED" && order.GetPaidUnix() > 0 && valid && amount.Sign() > 0 {
-				return "余额充值", nil
+				yes := true
+				found.Source = "余额充值"
+				found.Recharge = &yes
+				return found, nil
 			}
 		}
 		if int64(page)*50 >= result.Total {
-			return "", nil
+			return found, nil
 		}
 		if len(result.Orders) == 0 {
-			return "", errors.New("订单分页不完整，请稍后重试")
+			return qualification{}, errors.New("订单分页不完整，请稍后重试")
 		}
 	}
 	// shortcut: 最多核验 5000 条订单，宿主提供资格存在性查询后替换分页扫描。
-	return "", errors.New("历史订单过多，请联系管理员核实")
+	return qualification{}, errors.New("历史订单过多，请联系管理员核实")
 }
 
 func (plugin *Plugin) inviteKey(userID int64) string {

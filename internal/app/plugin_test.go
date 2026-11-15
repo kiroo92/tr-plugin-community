@@ -304,6 +304,35 @@ func TestInvitationsAndPermissions(t *testing.T) {
 	mustStatus(t, f.request("GET", "/status", "", "user"), 502)
 }
 
+func TestStatusReportsEachCondition(t *testing.T) {
+	f := setup(t)
+	status := func() map[string]any {
+		t.Helper()
+		response := f.request("GET", "/status", "", "user")
+		mustStatus(t, response, 200)
+		var payload map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	payload := status()
+	if payload["linuxdo"] != true || payload["recharge"] != nil {
+		t.Fatalf("LinuxDO 满足时应跳过订单核验: %v", payload)
+	}
+	f.linux = false
+	f.orders = nil
+	payload = status()
+	if payload["eligible"] != false || payload["linuxdo"] != false || payload["recharge"] != false {
+		t.Fatalf("未满足条件时两项均应为否: %v", payload)
+	}
+	f.orders = []*pluginpb.Order{{Type: "balance", Status: "COMPLETED", PaidUnix: 1, Amount: "0.01"}}
+	payload = status()
+	if payload["eligible"] != true || payload["linuxdo"] != false || payload["recharge"] != true || payload["source"] != "余额充值" {
+		t.Fatalf("充值满足时应单独标记: %v", payload)
+	}
+}
+
 func TestUncertainCreationAndValidation(t *testing.T) {
 	f := setup(t)
 	f.plugin.settings.Invites = true
