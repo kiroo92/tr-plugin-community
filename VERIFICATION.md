@@ -45,6 +45,15 @@
 - 公开后匿名下载 latest 的索引、签名及公钥，均与发布文件一致并通过验签。五个平台安装包全部匿名下载，大小和 SHA256 与签名索引一致。仓库未配置 GitHub Actions 工作流，验证在本地完成。
 - 已有来源需替换公钥后再刷新更新，升级后重新领取审批邀请。真实 Telegram 入群结果与目标宿主安装流程仍待验收。
 
+## v0.2.4 发行核验（2026-11-15）
+
+- 发布地址：https://github.com/kiroo92/tr-plugin-community/releases/tag/v0.2.4。标签指向源码提交 `b9e9878e50ddf4586008063a2fc22dbd9ec2e5db`，已公开为 latest。
+- 插件标识与前端构建统一为 `moonup.community`，用户入口 `/ext/moonup.community`，管理入口 `/admin/ext/moonup.community`。产物 CSS 作用域匹配新标识；按用户要求不提供旧地址跳转或数据迁移。
+- `GOMAXPROCS=2 GOFLAGS=-p=1 GOMEMLIMIT=1GiB CGO_ENABLED=1 make test` 通过：13 组 Go 测试、vet 和竞态检测。`make pack` 完成前端类型检查与构建、五平台编译、打包及 SDK validate，各二进制均指向标签源码且构建时工作区干净。
+- 使用 v0.2.3 的同一签名密钥，新索引新增 `moonup.community` 0.2.4 条目；旧标识保留历史版本并标记下架。SDK 签名、独立 Ed25519 验签及篡改拒绝通过，11 个草稿资产全部下载核对大小和 SHA256。
+- 正式公开后匿名下载 latest 索引、签名、公钥与五平台安装包，验签与全部包摘要核对通过。仓库未配置 GitHub Actions 工作流，验证在本地完成。
+- 新标识需独立安装并填写配置，安装前停用旧实例以免共用机器人轮询。此次发行未在目标宿主执行安装。
+
 ## 未验证及限制
 
 - 早期 Windows 验证因缺少 gcc 未完成竞态检查；本次 Linux 本地修改已启用 CGO 并通过完整竞态检查，见上节。
