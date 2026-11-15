@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,10 +50,11 @@ type fixture struct {
 	updates          []Update
 	calls            map[string]int
 	fail             string
-	failStatus       int           // injected failure status
-	loseApproval     bool          // drop successful approval response
-	admitted         []int64       // users admitted by fixture
-	approvalFinished chan struct{} // dropped response handler completion
+	failStatus       int              // injected failure status
+	loseApproval     bool             // drop successful approval response
+	admitted         []int64          // users admitted by fixture
+	messages         []map[string]any // captured outgoing bot messages
+	approvalFinished chan struct{}    // dropped response handler completion
 	modelBody        map[string]any
 	groupType        string
 	groupName        string
@@ -167,7 +169,7 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 		if input["member_limit"] != nil || input["creates_join_request"] != true {
 			f.t.Error("invitation must require approval and omit member_limit")
 		}
-		result = map[string]string{"invite_link": fmt.Sprintf("https://t.me/+test%d", f.calls[method])}
+		result = map[string]any{"invite_link": fmt.Sprintf("https://t.me/+test%d", f.calls[method]), "creates_join_request": true}
 	case "getUpdates":
 		result = f.updates
 	case "approveChatJoinRequest":
@@ -202,6 +204,12 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 		if input["user_id"] == nil {
 			f.t.Error("decline requires user_id")
 		}
+	case "sendMessage":
+		var input map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			f.t.Error(err)
+		}
+		f.messages = append(f.messages, input)
 	case "sendPhoto", "editMessageMedia":
 		if err := request.ParseMultipartForm(1 << 20); err != nil {
 			f.t.Error(err)
@@ -317,6 +325,9 @@ func TestPersistenceAndIsolation(t *testing.T) {
 	}
 }
 
+// TestInvitationsAndPermissions claims a permanent bot link through the website.
+// Its payload survives time and restart, and website authorization still rejects
+// anonymous callers and accounts without either eligibility source.
 func TestInvitationsAndPermissions(t *testing.T) {
 	f := setup(t)
 	f.plugin.settings.Invites = true
@@ -326,39 +337,37 @@ func TestInvitationsAndPermissions(t *testing.T) {
 	mustStatus(t, f.request("GET", "/status", "", "anonymous"), 401)
 	mustStatus(t, f.request("GET", "/admin/status", "", "user"), 403)
 	mustStatus(t, f.request("POST", "/admin/clear", "", "user"), 403)
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
-	if f.calls["createChatInviteLink"] != 1 {
-		t.Fatal("active link not reused")
+	response := f.request("POST", "/invite", "", "user")
+	mustStatus(t, response, 200)
+	var first struct {
+		Invite Invite `json:"invite"`
 	}
-	f.clock = f.clock.Add(11 * time.Minute)
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
-	if f.calls["createChatInviteLink"] != 2 {
-		t.Fatal("expired link not replaced")
-	}
-	var current Invite
-	_, _ = f.plugin.load(context.Background(), f.plugin.inviteKey(9), &current)
-	var update Update
-	raw := fmt.Sprintf(`{"update_id":100,"chat_member":{"chat":{"id":-100123456},"invite_link":{"invite_link":%q},"new_chat_member":{"status":"member"}}}`, current.URL)
-	if err := json.Unmarshal([]byte(raw), &update); err != nil {
+	if err := json.Unmarshal(response.Body.Bytes(), &first); err != nil {
 		t.Fatal(err)
 	}
-	f.updates = []Update{update}
-	if err := f.plugin.poll(context.Background()); err != nil {
-		t.Fatal(err)
+	entry, err := url.Parse(first.Invite.URL)
+	if err != nil || entry.Path != "/TestBot" || entry.Query().Get("start") == "" || first.Invite.Expires != 0 || first.Invite.StartToken != "" {
+		t.Fatal("website returned an invalid permanent bot link")
 	}
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 409)
-	if f.calls["revokeChatInviteLink"] != 1 {
-		t.Fatal("used invite not revoked")
+	if f.calls["createChatInviteLink"] != 0 {
+		t.Fatal("website created a group invitation before Start")
 	}
+	f.clock = f.clock.Add(365 * 24 * time.Hour)
 	f.restart()
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 409)
+	response = f.request("POST", "/invite", "", "user")
+	mustStatus(t, response, 200)
+	var later struct {
+		Invite Invite `json:"invite"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &later); err != nil {
+		t.Fatal(err)
+	}
+	if later.Invite.URL != first.Invite.URL || later.Invite.Expires != 0 {
+		t.Fatal("bot link expired or changed after restart")
+	}
 	f.linux = false
 	f.orders = nil
 	mustStatus(t, f.request("GET", "/image", "", "user"), 403)
-	if _, err := f.plugin.db.Exec("DELETE FROM records WHERE key=?", f.plugin.inviteKey(9)); err != nil {
-		t.Fatal(err)
-	}
 	mustStatus(t, f.request("POST", "/invite", "", "user"), 403)
 	f.orders = []*pluginpb.Order{{Type: "subscription", Status: "COMPLETED", PaidUnix: 1, Amount: "100"}, {Type: "balance", Status: "COMPLETED", PaidUnix: 0, Amount: "1"}, {Type: "balance", Status: "COMPLETED", PaidUnix: 1, Amount: "0"}}
 	mustStatus(t, f.request("POST", "/invite", "", "user"), 403)
@@ -368,9 +377,27 @@ func TestInvitationsAndPermissions(t *testing.T) {
 	mustStatus(t, f.request("GET", "/status", "", "user"), 502)
 }
 
+// bindAccount installs a test binding for admission failure scenarios.
+// Production redemption is covered separately through serialized private Start
+// updates; these scenarios prepare ownership before injecting approval API failures.
+func (f *fixture) bindAccount(telegramID int64) Invite {
+	f.t.Helper()
+	f.plugin.settings.Invites = true
+	current, err := f.plugin.issueBotLink(context.Background(), 9, "test eligibility")
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	current.TelegramID = telegramID
+	current.BoundAt = f.clock.Unix()
+	if err := f.plugin.save(context.Background(), f.plugin.inviteKey(9), current); err != nil {
+		f.t.Fatal(err)
+	}
+	return current
+}
+
 // TestPublicGroupAndJoinRequests processes two requesters using one public-group
-// invitation in the same poll. Exactly one admission survives revocation failure
-// and restart, while unrelated links remain rejected.
+// invitation in the same poll. The bound owner is admitted without invitation
+// attribution; unbound requesters remain rejected through cleanup failure and restart.
 func TestPublicGroupAndJoinRequests(t *testing.T) {
 	f := setup(t)
 	f.plugin.settings.Invites = true
@@ -387,12 +414,15 @@ func TestPublicGroupAndJoinRequests(t *testing.T) {
 	if !group.Public || group.Username != "moonup_chat" || !group.Approval {
 		t.Fatalf("公开群与审批状态未记录: %+v", group)
 	}
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
+	f.bindAccount(777)
+	if _, err := f.plugin.issue(context.Background(), 9, "test eligibility"); err != nil {
+		t.Fatal(err)
+	}
 	var current Invite
 	if _, err := f.plugin.load(context.Background(), f.plugin.inviteKey(9), &current); err != nil {
 		t.Fatal(err)
 	}
-	raw := fmt.Sprintf(`{"update_id":300,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":777},"invite_link":{"invite_link":%q}}}`, current.URL)
+	raw := `{"update_id":300,"chat_join_request":{"chat":{"id":-100123456},"from":{"id":777}}}`
 	var update Update
 	if err := json.Unmarshal([]byte(raw), &update); err != nil {
 		t.Fatal(err)
@@ -461,7 +491,8 @@ func TestApprovalOutcomes(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
-			current, err := f.plugin.issue(ctx, 9, "test eligibility")
+			f.bindAccount(777)
+			_, err := f.plugin.issue(ctx, 9, "test eligibility")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -473,7 +504,7 @@ func TestApprovalOutcomes(t *testing.T) {
 			if scenario.lostResponse {
 				f.approvalFinished = make(chan struct{})
 			}
-			if err := f.plugin.resolveJoin(ctx, 777, current.URL); err == nil {
+			if err := f.plugin.resolveJoin(ctx, 777); err == nil {
 				t.Fatal("approval failure was not reported")
 			}
 			if scenario.lostResponse {
@@ -495,7 +526,7 @@ func TestApprovalOutcomes(t *testing.T) {
 			f.fail = ""
 			f.loseApproval = false
 			f.restart()
-			if err := f.plugin.resolveJoin(ctx, 778, current.URL); err != nil {
+			if err := f.plugin.resolveJoin(ctx, 777); err != nil {
 				t.Fatal(err)
 			}
 			if len(f.admitted) > 1 {
@@ -505,7 +536,7 @@ func TestApprovalOutcomes(t *testing.T) {
 				if f.calls["approveChatJoinRequest"] != 1 || f.calls["declineChatJoinRequest"] != 1 {
 					t.Fatal("uncertain approval released the invitation")
 				}
-			} else if len(f.admitted) != 1 || f.admitted[0] != 778 {
+			} else if len(f.admitted) != 1 || f.admitted[0] != 777 {
 				t.Fatal("definite rejection did not permit a later admission")
 			}
 		})
@@ -519,7 +550,9 @@ func TestLegacyInvitationReplacement(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
 	f.plugin.settings.Invites = true
-	legacy := Invite{UserID: 9, URL: "https://t.me/+legacy", Expires: f.clock.Add(lifetime).Unix()}
+	legacy := f.bindAccount(777)
+	legacy.URL = "https://t.me/+legacy"
+	legacy.Expires = f.clock.Add(lifetime).Unix()
 	if err := f.plugin.save(ctx, f.plugin.inviteKey(9), legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -531,8 +564,8 @@ func TestLegacyInvitationReplacement(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Invite.URL != "" {
-		t.Fatal("status exposed a legacy invitation URL")
+	if !strings.HasPrefix(status.Invite.URL, "https://t.me/TestBot?start=") {
+		t.Fatal("status did not expose the permanent bot entry")
 	}
 	f.fail = "revokeChatInviteLink"
 	if _, err := f.plugin.issue(ctx, 9, "test eligibility"); err == nil {
@@ -557,38 +590,49 @@ func TestLegacyInvitationReplacement(t *testing.T) {
 	}
 }
 
-// TestJoinRequestDiagnostics checks missing attribution, unknown links, and old
-// invitation modes. Each request is declined with a distinct diagnostic while
-// preserving the website account's unused admission claim.
+// TestJoinRequestDiagnostics rejects unbound, revoked, and ineligible requesters.
+// A group link alone cannot establish ownership, and qualifying callers require
+// a completed private Start binding before admission is considered.
 func TestJoinRequestDiagnostics(t *testing.T) {
 	for _, scenario := range []struct {
-		name   string
-		link   string
-		legacy bool
-		detail string
+		name       string
+		bound      bool
+		revoked    bool
+		ineligible bool
+		detail     string
 	}{
-		{name: "missing", detail: "未携带邀请链接"},
-		{name: "unknown", link: "https://t.me/+unknown", detail: "未匹配到网站领取记录"},
-		{name: "legacy", link: "https://t.me/+legacy", legacy: true, detail: "旧版链接模式"},
+		{name: "unbound", detail: "尚未完成绑定"},
+		{name: "revoked entry", bound: true, revoked: true, detail: "尚未完成绑定"},
+		{name: "ineligible owner", bound: true, ineligible: true, detail: "暂不可用"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			f := setup(t)
 			ctx := context.Background()
-			if scenario.legacy {
-				legacy := Invite{UserID: 9, URL: scenario.link, Expires: f.clock.Add(lifetime).Unix()}
-				if err := f.plugin.save(ctx, f.plugin.inviteKey(9), legacy); err != nil {
+			if scenario.bound {
+				current := f.bindAccount(777)
+				if _, err := f.plugin.issue(ctx, 9, "test eligibility"); err != nil {
 					t.Fatal(err)
 				}
+				if scenario.revoked {
+					current.StartToken = ""
+					if err := f.plugin.save(ctx, f.plugin.inviteKey(9), current); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
-			if err := f.plugin.resolveJoin(ctx, 777, scenario.link); err != nil {
+			if scenario.ineligible {
+				f.linux = false
+				f.orders = nil
+			}
+			if err := f.plugin.resolveJoin(ctx, 777); err != nil {
 				t.Fatal(err)
 			}
 			var events []Event
 			if _, err := f.plugin.load(ctx, f.plugin.scoped("events"), &events); err != nil {
 				t.Fatal(err)
 			}
-			if f.calls["approveChatJoinRequest"] != 0 || f.calls["declineChatJoinRequest"] != 1 || len(events) != 1 || !strings.Contains(events[0].Detail, scenario.detail) {
-				t.Fatalf("unexpected rejection diagnostic: %+v", events)
+			if f.calls["approveChatJoinRequest"] != 0 || f.calls["declineChatJoinRequest"] != 1 || len(events) == 0 || !strings.Contains(events[0].Detail, scenario.detail) {
+				t.Fatalf("unexpected rejection: %+v", events)
 			}
 		})
 	}
@@ -626,15 +670,22 @@ func TestStatusReportsEachCondition(t *testing.T) {
 func TestUncertainCreationAndValidation(t *testing.T) {
 	f := setup(t)
 	f.plugin.settings.Invites = true
+	f.bindAccount(777)
 	f.fail = "createChatInviteLink"
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 409)
+	if _, err := f.plugin.issue(context.Background(), 9, "test eligibility"); err == nil {
+		t.Fatal("uncertain creation accepted")
+	}
 	f.fail = ""
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 409)
+	if _, err := f.plugin.issue(context.Background(), 9, "test eligibility"); err == nil {
+		t.Fatal("uncertain creation was retried")
+	}
 	if f.calls["createChatInviteLink"] != 1 {
 		t.Fatal("uncertain creation duplicated")
 	}
 	f.clock = f.clock.Add(11 * time.Minute)
-	mustStatus(t, f.request("POST", "/invite", "", "user"), 200)
+	if _, err := f.plugin.issue(context.Background(), 9, "test eligibility"); err != nil {
+		t.Fatal(err)
+	}
 	invalid := f.plugin.settings
 	invalid.Endpoint = "http://external.example/v1"
 	raw, _ := json.Marshal(invalid)
@@ -779,8 +830,8 @@ func TestConcurrentClaims(t *testing.T) {
 			t.Fatal("unexpected concurrent status", code)
 		}
 	}
-	if !success || f.calls["createChatInviteLink"] != 1 {
-		t.Fatal("concurrent claims created duplicate invitations")
+	if !success || f.calls["createChatInviteLink"] != 0 {
+		t.Fatal("website claim created a group invitation before Start")
 	}
 }
 

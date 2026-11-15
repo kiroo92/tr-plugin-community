@@ -9,13 +9,14 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // telegram.go exchanges Bot API messages and routes group updates to invitation,
 // assistant, and channel handlers. The configured bot needs invitation rights,
 // and public groups need group approval to restrict their public entry. Updates
-// contain optional invitation attribution, which admission checks against stored
-// website claims. The polling loop serializes these operations with HTTP calls.
+// contain requester identities, which admission checks against bindings created
+// by private Start messages. The polling loop serializes these operations with HTTP calls.
 //
 // Response parsing distinguishes a validated client rejection from an uncertain
 // transport or server outcome. Admission uses that distinction to decide whether
@@ -177,12 +178,15 @@ type TGUser struct {
 	ID  int64 `json:"id"`
 	Bot bool  `json:"is_bot"`
 }
+
+// Message carries Telegram text, sender identity, and chat routing information.
 type Message struct {
 	ID   int64  `json:"message_id"`
 	Date int64  `json:"date"`
 	Text string `json:"text"`
 	Chat struct {
-		ID int64 `json:"id"`
+		ID   int64  `json:"id"`
+		Type string `json:"type"` // Telegram chat category
 	} `json:"chat"`
 	From  TGUser   `json:"from"`
 	Reply *Message `json:"reply_to_message"`
@@ -202,6 +206,7 @@ type Update struct {
 		New struct {
 			Status   string `json:"status"`
 			IsMember bool   `json:"is_member"`
+			User     TGUser `json:"user"` // resulting membership owner
 		} `json:"new_chat_member"`
 	} `json:"chat_member"`
 	Join *struct {
@@ -224,10 +229,10 @@ type Update struct {
 // in one sequence. Bot permissions are refreshed periodically and persisted
 // revocations are retried before accepting another batch.
 //
-// Membership events consume matching invitations, and join requests delegate
-// admission to resolveJoin. Assistant messages advance the offset before their
-// external effects; other updates advance it after handling so interrupted work
-// can be reconsidered on the next poll.
+// Private Start messages establish bindings before entry delivery, and membership
+// events consume the corresponding owner's claim. Join requests delegate approval
+// to resolveJoin. Assistant messages advance the offset before external effects;
+// other updates advance after handling so interrupted work can be reconsidered.
 func (plugin *Plugin) poll(ctx context.Context) error {
 	var bot Bot
 	found, err := plugin.load(ctx, plugin.scoped("bot"), &bot)
@@ -257,8 +262,8 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 		if update.ID < offset {
 			continue
 		}
-		if update.Member != nil && strconv.FormatInt(update.Member.Chat.ID, 10) == plugin.chat && update.Member.Invite.Link != "" && (update.Member.New.Status == "member" || update.Member.New.Status == "administrator" || update.Member.New.Status == "restricted" && update.Member.New.IsMember) {
-			current, found, err := plugin.inviteByLink(ctx, update.Member.Invite.Link)
+		if update.Member != nil && strconv.FormatInt(update.Member.Chat.ID, 10) == plugin.chat && (update.Member.New.Status == "member" || update.Member.New.Status == "administrator" || update.Member.New.Status == "restricted" && update.Member.New.IsMember) {
+			current, found, err := plugin.inviteForTelegram(ctx, update.Member.New.User.ID)
 			if err != nil {
 				return err
 			}
@@ -266,20 +271,36 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 				// Membership is already effective in Telegram. Persist consumption before
 				// cleanup so a failed revocation cannot restore this website account's eligibility.
 				current.Used = true
-				current.Revoke = true
+				current.Revoke = current.URL != "" && !current.Revoked
 				if err := plugin.save(ctx, plugin.inviteKey(current.UserID), current); err != nil {
 					return err
 				}
-				_ = plugin.revoke(ctx, &current)
+				if current.Revoke {
+					// Membership is confirmed even if cleanup fails. Pending revocation is
+					// retained by the saved record and retried before a later poll.
+					_ = plugin.revoke(ctx, &current)
+				}
 			}
 		}
 		if update.Join != nil && strconv.FormatInt(update.Join.Chat.ID, 10) == plugin.chat {
-			// Admission consumes a persisted website claim before approving a request.
-			// Missing invitation attribution is declined because public-entry requests cannot identify a claim.
-			if err := plugin.resolveJoin(ctx, update.Join.From.ID, update.Join.Invite.Link); err != nil {
+			// Bindings identify the requester even when Telegram omits invitation attribution.
+			// An unbound holder of a forwarded group link has no admission claim.
+			if err := plugin.resolveJoin(ctx, update.Join.From.ID); err != nil {
 				if eventErr := plugin.event(ctx, "处理入群请求失败", err.Error()); eventErr != nil {
 					return eventErr
 				}
+			}
+		}
+		if update.Message != nil && update.Message.Chat.Type == "private" &&
+			update.Message.Chat.ID == update.Message.From.ID && !update.Message.From.Bot &&
+			strings.HasPrefix(update.Message.Text, "/start") {
+			if err := plugin.handleStart(ctx, update.Message); err != nil {
+				// Keep this update available when binding or delivery fails. Replaying
+				// Start reuses the persisted owner and group entry after transient failures.
+				if eventErr := plugin.event(ctx, "机器人绑定处理失败", err.Error()); eventErr != nil {
+					return eventErr
+				}
+				return err
 			}
 		}
 		if update.Message != nil && strconv.FormatInt(update.Message.Chat.ID, 10) == plugin.chat && !update.Message.From.Bot && update.Message.Date >= plugin.now().Unix()-120 && len(update.Message.Text) <= 12000 {

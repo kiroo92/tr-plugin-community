@@ -1,7 +1,7 @@
 # 社群中心正式插件
 
 ## 目标与边界
-- 按 telegram-prototype 实现邀请领取、AI 助手、渠道状态图；不绑定 TG，不发套餐，不做入群验证。
+- 实现永久机器人专属链接、Start 自动绑定、按绑定账号审批、AI 助手与渠道状态图。
 - 使用 kiroo92 SDK v0.3.0，目标其宿主 v0.7.3；不改宿主，不部署。源码按用户要求发布到独立 GitHub 仓库。
 - 重型检查串行，GOMAXPROCS=2、GOFLAGS=-p=1、GOMEMLIMIT=1GiB。
 

@@ -14,9 +14,9 @@ import (
 
 // http.go exposes authenticated community status, invitation claims, and
 // administrator controls through the plugin's declared routes. Host caller
-// metadata determines user and administrator access. Responses reveal usable
-// invitation URLs to eligible claimants, while administrator lists omit URLs and
-// status reads hide ordinary links that require replacement after an upgrade.
+// metadata determines user and administrator access. Responses reveal permanent
+// bot entry URLs to eligible claimants. Start tokens are removed from serialized
+// records, and administrator lists omit both group URLs and bot entry tokens.
 //
 // Each request attempts the same mutex used by polling. Busy requests return a
 // conflict so external calls and invitation mutations run in one sequence.
@@ -40,8 +40,9 @@ func (plugin *Plugin) Handler() http.Handler {
 // conflict so callers can retry after polling or another HTTP request finishes.
 //
 // The shared mutex covers stored claims and configuration throughout dispatch.
-// Status responses hide unusable and legacy invitation URLs, letting the user
-// request a replacement while issue retains the stored URL needed for revocation.
+// Status responses rebuild permanent bot entry URLs for the website owner.
+// Stored invitation URLs remain available to private Start delivery and cleanup,
+// while entry tokens are removed before either user or administrator serialization.
 func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "private, no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -94,18 +95,16 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 				problem(writer, 403, errors.New("请先绑定 LinuxDO 或完成余额充值"))
 				return
 			}
-			current, err = plugin.issue(ctx, caller.UserID, source)
+			current, err = plugin.issueBotLink(ctx, caller.UserID, source)
 			if err != nil {
 				problem(writer, 409, err)
 				return
 			}
 		}
-		// Hide ordinary links from earlier versions so the page offers replacement.
-		// Keep their stored URLs available to issue for revocation before replacement.
-		if source == "" || !plugin.settings.Invites || !current.JoinRequest ||
-			current.Used || current.Revoked || current.Revoke ||
-			current.Expires <= plugin.now().Unix() {
-			current.URL = ""
+		current, err = plugin.websiteInvite(ctx, current, source != "" && plugin.settings.Invites && plugin.token != "")
+		if err != nil {
+			problem(writer, 500, err)
+			return
 		}
 		sdk.WriteJSON(writer, 200, map[string]any{"eligible": source != "", "source": source, "linuxdo": qualification.LinuxDO, "recharge": qualification.Recharge, "enabled": plugin.settings.Invites && plugin.token != "", "group": plugin.settings.Group, "invite": current, "ai": plugin.settings.AI, "name": plugin.settings.Name, "channels": plugin.settings.Channels, "keywords": plugin.settings.Keywords, "public": group.Public, "approval": group.Approval, "now": plugin.now().Unix()})
 	case "/image":
@@ -167,7 +166,10 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 			next = records[len(records)-1].UserID
 		}
 		for index := range records {
+			// Administrator lists show binding status, while bearer credentials remain
+			// available through the authenticated owner's website entry and private bot conversation.
 			records[index].URL = ""
+			records[index].StartToken = ""
 		}
 		sdk.WriteJSON(writer, 200, map[string]any{"records": records, "next": next})
 	case "/admin/settings":
@@ -205,9 +207,18 @@ func (plugin *Plugin) serve(writer http.ResponseWriter, request *http.Request) {
 			problem(writer, 404, errors.New("未找到邀请"))
 			return
 		}
-		if err := plugin.revoke(ctx, &current); err != nil {
-			problem(writer, 502, err)
+		// Revoke the permanent entry before remote cleanup. Already bound identities
+		// remain recorded, but cleared tokens block both Start and admission until reclaimed.
+		current.StartToken = ""
+		if err := plugin.save(ctx, plugin.inviteKey(input.UserID), current); err != nil {
+			problem(writer, 500, err)
 			return
+		}
+		if current.URL != "" && !current.Revoked {
+			if err := plugin.revoke(ctx, &current); err != nil {
+				problem(writer, 502, err)
+				return
+			}
 		}
 		sdk.WriteJSON(writer, 200, map[string]bool{"revoked": true})
 	case "/admin/clear":

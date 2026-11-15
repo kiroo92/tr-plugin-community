@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "moonup.community",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "apiVersion": 1,
   "minHostVersion": "0.7.3",
   "name": {
@@ -9,8 +9,8 @@
     "zh": "社群中心"
   },
   "description": {
-    "en": "符合网站资格后领取 Telegram 邀请，使用 AI 群聊助手及公开渠道状态图。",
-    "zh": "符合网站资格后领取 Telegram 邀请，使用 AI 群聊助手及公开渠道状态图。"
+    "en": "领取永久机器人专属链接，Start 自动绑定并私发群邀请，使用 AI 群聊助手及公开渠道状态图。",
+    "zh": "领取永久机器人专属链接，Start 自动绑定并私发群邀请，使用 AI 群聊助手及公开渠道状态图。"
   },
   "publisher": {
     "name": "kiroo92"

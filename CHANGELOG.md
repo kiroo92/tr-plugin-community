@@ -1,3 +1,10 @@
+# v0.2.5
+
+- 网站领取改为长期有效的机器人 `?start=` 专属链接，取消倒计时和直接展示群邀请。
+- 私聊 Start 自动绑定网站账号与 Telegram ID，再由机器人私发入群邀请。
+- 入群审批按绑定账号核验，支持 Telegram 未携带邀请链接的请求；绑定和专属入口在重启后继续有效。
+- 页面和管理记录显示绑定状态，已绑定的入口拒绝其他 Telegram 账号接管。
+
 # v0.2.4
 
 - 插件标识改为 `moonup.community`，用户入口改为 `/ext/moonup.community`，管理入口改为 `/admin/ext/moonup.community`。
