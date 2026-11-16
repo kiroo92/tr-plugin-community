@@ -32,8 +32,10 @@
 
 - [x] T16：v0.2.9 将 `/id` 改为网站用户 ID，状态图每次新发并持久重试旧图清理，完善统计错误提示。32 组测试、vet、竞态、前端及五平台包校验通过，草稿和公开 11 个资产回下载及签名验证一致，已公开为 latest。
 
+- [x] T17：v0.2.10 精简状态图附文，只显示标题时间与满血、特惠数量；32 组测试及竞态、前端、五平台安装包和签名核验通过，已公开为 latest。
+
 ## 恢复点
-- 当前版本：v0.2.9，标识 moonup.community，已公开为 latest，源码标签指向 3ebcfb86f85418a49626cde23c85f64787534424。
+- 当前版本：v0.2.10，标识 moonup.community，已公开为 latest，源码标签指向 5fd4b45743462d7ccbaaa3958b06e189e4104ade。
 - 已验证：32 组测试、go vet、Linux CGO 竞态检查、前端类型检查与构建、五平台编译打包及 validate。
 - 分发核验：草稿 11 个资产逐一核对；公开后 latest 索引验签与五个平台匿名下载摘要一致。
 - 密钥：新公钥见 README；私钥位于用户配置目录 TokenRouter/plugin-signing/tr-plugin-community.key，并保存在仓库 Actions secret INDEX_SIGNING_KEY。已有来源须替换公钥后刷新更新。
