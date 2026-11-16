@@ -17,11 +17,11 @@ import (
 // public channel observations advance independently. Failed or malformed exports
 // leave every count unknown in the current chart.
 //
-// Telegram captions append the requested counts after the channel observation summary.
+// Telegram captions contain the chart title, update time, and requested pool counts.
 // Display labels may be shortened for the two GPT pools, while numeric identity
-// remains the basis for association. Source timestamps and stale warnings travel
-// with displayed observations, so a retained remote snapshot cannot look like a
-// newly collected account count merely because the chart was regenerated.
+// remains the basis for association. Source timestamps, stale flags, and retrieval
+// diagnostics stay in ChannelState for administrator inspection. Caption formatting
+// uses the measured counts, with unavailable observations displayed as unknown.
 
 // loadPoolCounts fills available counts after validating one complete pool export.
 // The caller holds plugin.mu and supplies fresh catalog groups. Failure clears
@@ -131,23 +131,12 @@ func poolResponseError(status int, raw []byte) string {
 }
 
 // channelCaption appends available counts for the requested GPT pools after the
-// channel observation summary. Other groups remain in the chart and do not
+// title and update time. Other groups remain in the chart and do not
 // receive account lines. Missing exported counts remain unknown, including a
 // failed fetch whose previously collected quantities have been cleared.
 func channelCaption(state ChannelState) string {
 	var text strings.Builder
 	text.WriteString("渠道运行状态 · " + time.Unix(state.Updated, 0).In(time.FixedZone("UTC+8", 8*3600)).Format("01-02 15:04 UTC+8") + "\n")
-	text.WriteString("灰色表示暂无有效观测；首字和缓存取最近有效观测。\n")
-	if state.PoolAt != "" {
-		at, _ := time.Parse(time.RFC3339, state.PoolAt)
-		text.WriteString("号池快照：" + at.In(time.FixedZone("UTC+8", 8*3600)).Format("01-02 15:04 UTC+8"))
-		if state.PoolStale {
-			text.WriteString("（旧快照）")
-		}
-	} else {
-		text.WriteString(state.PoolError)
-	}
-	text.WriteString("\n")
 	for _, label := range []string{"GPT满血", "GPT特惠"} {
 		for _, group := range state.Groups {
 			if poolSummaryLabel(group.Name) != label {

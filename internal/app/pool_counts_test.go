@@ -33,6 +33,9 @@ func TestPoolCounts(t *testing.T) {
 		t.Fatalf("incorrect group association or zero handling: %+v", state)
 	}
 	caption := channelCaption(state)
+	if strings.Contains(caption, "灰色") || strings.Contains(caption, "快照") || strings.Contains(caption, "最近有效观测") {
+		t.Fatal("caption contains removed explanations", caption)
+	}
 	if strings.Contains(caption, "[Empty]") || strings.Contains(caption, "[Unmapped]") {
 		t.Fatal("other pools appeared in caption", caption)
 	}
@@ -43,8 +46,8 @@ func TestPoolCounts(t *testing.T) {
 	}
 	body = fmt.Sprintf(`{"snapshot_at":%q,"group_stats":[{"id":11,"available_accounts":500}]}`, f.clock.Add(-time.Hour).Format(time.RFC3339))
 	f.plugin.loadPoolCounts(context.Background(), &state)
-	if !state.PoolStale || !strings.Contains(channelCaption(state), "旧快照") {
-		t.Fatal("old snapshot appeared current")
+	if !state.PoolStale || state.PoolAt == "" {
+		t.Fatal("old snapshot metadata was lost")
 	}
 	for _, invalid := range []string{
 		`{"group_stats":[]}`,
