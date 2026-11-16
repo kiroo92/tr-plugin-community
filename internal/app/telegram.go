@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 )
 
 // telegram.go exchanges Bot API messages and routes group updates to invitation,
@@ -28,6 +27,78 @@ import (
 type telegramRejection struct {
 	method string // rejected API method
 	code   int    // Telegram HTTP status
+}
+
+// Bot holds the verified bot identity used for message routing.
+type Bot struct {
+	ID       int64  `json:"id"`       // Telegram bot identifier
+	Username string `json:"username"` // Telegram bot username
+}
+
+// GroupState records verified group properties used by onboarding and administrator status.
+type GroupState struct {
+	ChatID   string `json:"chat_id"`            // configured group identifier
+	Public   bool   `json:"public"`             // public username presence
+	Username string `json:"username,omitempty"` // public group username
+	Approval bool   `json:"approval"`           // group approval requirement
+}
+
+// TGUser identifies a Telegram message sender or membership owner.
+type TGUser struct {
+	ID  int64 `json:"id"`     // Telegram user identifier
+	Bot bool  `json:"is_bot"` // automated account marker
+}
+
+// TGChat identifies a destination or a message's chat sender identity.
+type TGChat struct {
+	ID   int64  `json:"id"`   // Telegram chat identifier
+	Type string `json:"type"` // Telegram chat category
+}
+
+// Message carries Telegram text, sender identity, and chat routing information.
+type Message struct {
+	ID       int64  `json:"message_id"`        // originating message identifier
+	Date     int64  `json:"date"`              // Unix seconds
+	ThreadID int64  `json:"message_thread_id"` // originating topic identifier
+	Text     string `json:"text"`              // incoming text content
+	Chat     TGChat `json:"chat"`              // originating conversation identity
+	From     TGUser `json:"from"`              // Telegram supplied sender
+	// SenderChat takes precedence over From for identity queries because Telegram
+	// may supply a synthetic user for anonymous administrators and channel senders.
+	SenderChat *TGChat  `json:"sender_chat"`
+	Reply      *Message `json:"reply_to_message"` // directly replied message
+}
+
+// Update carries Telegram messages, membership changes, and optional join attribution.
+type Update struct {
+	ID      int64    `json:"update_id"`
+	Message *Message `json:"message"`
+	Member  *struct {
+		Chat struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+		Invite struct {
+			Link string `json:"invite_link"`
+		} `json:"invite_link"`
+		New struct {
+			Status   string `json:"status"`
+			IsMember bool   `json:"is_member"`
+			User     TGUser `json:"user"` // resulting membership owner
+		} `json:"new_chat_member"`
+	} `json:"chat_member"`
+	Join *struct {
+		Chat struct {
+			ID int64 `json:"id"`
+		} `json:"chat"`
+		From struct {
+			ID int64 `json:"id"`
+		} `json:"from"`
+		// Invite contains Telegram's optional invitation attribution. Link stays empty
+		// when the join request arrives through a public entry without an invite.
+		Invite struct {
+			Link string `json:"invite_link"`
+		} `json:"invite_link"`
+	} `json:"chat_join_request"`
 }
 
 // Error returns a diagnostic that excludes request credentials and payloads.
@@ -109,19 +180,13 @@ func (plugin *Plugin) telegramResult(ctx context.Context, method string, respons
 	return nil
 }
 
-type Bot struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-}
-
-// GroupState 记录检查连接时读到的目标群组属性，用于管理端提示门禁是否成立。
-type GroupState struct {
-	ChatID   string `json:"chat_id"`
-	Public   bool   `json:"public"`
-	Username string `json:"username,omitempty"`
-	Approval bool   `json:"approval"`
-}
-
+// checkBot verifies bot identity, polling access, and administrator invitation
+// rights before publishing the connection state. Callers hold plugin.mu. Group
+// approval metadata is saved for onboarding to decide whether public entry is
+// restricted, and successful verification starts the permission refresh interval.
+// Menu failures are recorded separately from permission checks and retried on
+// later checks until their complete fingerprint is persisted. Telegram's shared
+// rate-limit cooldown still applies to subsequent API requests.
 func (plugin *Plugin) checkBot(ctx context.Context) error {
 	if plugin.token == "" {
 		return errors.New("请先在宿主插件配置中填写 Bot Token 和群组 ID")
@@ -151,8 +216,8 @@ func (plugin *Plugin) checkBot(ctx context.Context) error {
 	if chat.Type != "supergroup" {
 		return errors.New("需要超级群组（公开或私有均可）")
 	}
-	// 公开群必须开启群级审批才能形成门禁：否则任何人直接用 @用户名 就能进群。
-	// 开启审批后由插件按 chat_join_request 携带的链接决定批准或拒绝。
+	// Public entries require group approval to enforce eligibility. The join handler
+	// checks the requester's binding even when Telegram omits the invitation link.
 	group := GroupState{ChatID: plugin.chat, Public: chat.Username != "", Username: chat.Username, Approval: chat.JoinByRequest}
 	if err := plugin.save(ctx, plugin.scoped("group"), group); err != nil {
 		return err
@@ -171,57 +236,12 @@ func (plugin *Plugin) checkBot(ctx context.Context) error {
 		return err
 	}
 	plugin.checkedAt = plugin.now().Unix()
+	if err := plugin.syncCommands(ctx); err != nil {
+		// Keep verified permission state after a menu failure. Later checks retry the
+		// incomplete menus, and Telegram's shared cooldown continues to govern API requests.
+		return plugin.event(ctx, "机器人命令菜单更新失败", err.Error())
+	}
 	return nil
-}
-
-type TGUser struct {
-	ID  int64 `json:"id"`
-	Bot bool  `json:"is_bot"`
-}
-
-// Message carries Telegram text, sender identity, and chat routing information.
-type Message struct {
-	ID   int64  `json:"message_id"`
-	Date int64  `json:"date"`
-	Text string `json:"text"`
-	Chat struct {
-		ID   int64  `json:"id"`
-		Type string `json:"type"` // Telegram chat category
-	} `json:"chat"`
-	From  TGUser   `json:"from"`
-	Reply *Message `json:"reply_to_message"`
-}
-
-// Update carries Telegram messages, membership changes, and optional join attribution.
-type Update struct {
-	ID      int64    `json:"update_id"`
-	Message *Message `json:"message"`
-	Member  *struct {
-		Chat struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-		Invite struct {
-			Link string `json:"invite_link"`
-		} `json:"invite_link"`
-		New struct {
-			Status   string `json:"status"`
-			IsMember bool   `json:"is_member"`
-			User     TGUser `json:"user"` // resulting membership owner
-		} `json:"new_chat_member"`
-	} `json:"chat_member"`
-	Join *struct {
-		Chat struct {
-			ID int64 `json:"id"`
-		} `json:"chat"`
-		From struct {
-			ID int64 `json:"id"`
-		} `json:"from"`
-		// Invite contains Telegram's optional invitation attribution. Link stays empty
-		// when the join request arrives through a public entry without an invite.
-		Invite struct {
-			Link string `json:"invite_link"`
-		} `json:"invite_link"`
-	} `json:"chat_join_request"`
 }
 
 // poll processes one batch of Telegram updates for the configured group.
@@ -229,9 +249,10 @@ type Update struct {
 // in one sequence. Bot permissions are refreshed periodically and persisted
 // revocations are retried before accepting another batch.
 //
-// Private Start messages establish bindings before entry delivery, and membership
+// Private commands retry uncertain failures after their handlers persist binding
+// and invitation changes. Commands are routed before assistant triggers, and membership
 // events consume the corresponding owner's claim. Join requests delegate approval
-// to resolveJoin. Assistant messages advance the offset before external effects;
+// to resolveJoin. Group messages advance the offset before external effects;
 // other updates advance after handling so interrupted work can be reconsidered.
 func (plugin *Plugin) poll(ctx context.Context) error {
 	var bot Bot
@@ -291,13 +312,15 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 				}
 			}
 		}
+		// Private commands can resume pending onboarding after an outage. Bound text
+		// size limits parsing work while leaving their delivery independent of message age.
 		if update.Message != nil && update.Message.Chat.Type == "private" &&
-			update.Message.Chat.ID == update.Message.From.ID && !update.Message.From.Bot &&
-			strings.HasPrefix(update.Message.Text, "/start") {
-			if err := plugin.handleStart(ctx, update.Message); err != nil {
+			update.Message.From.ID > 0 && update.Message.Chat.ID == update.Message.From.ID &&
+			!update.Message.From.Bot && update.Message.SenderChat == nil && len(update.Message.Text) <= 12000 {
+			if _, err := plugin.handleCommand(ctx, update.Message); err != nil {
 				// Report the failure before deciding whether to retain this update.
 				// Persisted ownership lets a later Start resume without creating a second binding.
-				if eventErr := plugin.event(ctx, "机器人绑定处理失败", err.Error()); eventErr != nil {
+				if eventErr := plugin.event(ctx, "机器人私聊命令处理失败", err.Error()); eventErr != nil {
 					return eventErr
 				}
 				var rejection *telegramRejection
@@ -308,20 +331,29 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 				// retried usefully in this batch. Advance so other users' updates still run.
 			}
 		}
-		if update.Message != nil && strconv.FormatInt(update.Message.Chat.ID, 10) == plugin.chat && !update.Message.From.Bot && update.Message.Date >= plugin.now().Unix()-120 && len(update.Message.Text) <= 12000 {
-			// Persist progress before model calls because Telegram replies have no
-			// idempotency key; a crash can omit a reply but cannot replay this request.
+		// Limit group processing to recent bounded messages so reconnection does not
+		// replay old commands or model prompts into an active group conversation.
+		if update.Message != nil &&
+			strconv.FormatInt(update.Message.Chat.ID, 10) == plugin.chat &&
+			(!update.Message.From.Bot || update.Message.SenderChat != nil) &&
+			update.Message.Date >= plugin.now().Unix()-120 && len(update.Message.Text) <= 12000 {
+			// Persist progress before group command and model effects because Telegram
+			// replies have no idempotency key. A crash can omit a reply but prevents replay.
 			if err := plugin.save(ctx, plugin.scoped("offset"), update.ID+1); err != nil {
 				return err
 			}
-			if err := plugin.handleMessage(ctx, update.Message); err != nil {
+			handled, err := plugin.handleCommand(ctx, update.Message)
+			if err == nil && !handled && update.Message.SenderChat == nil {
+				err = plugin.handleMessage(ctx, update.Message)
+			}
+			if err != nil {
 				if err := plugin.event(ctx, "群消息处理失败", err.Error()); err != nil {
 					return err
 				}
 			}
 		}
-		// Non-assistant handlers have finished before progress is persisted. Their
-		// durable invitation flags remain available if offset persistence requires another poll.
+		// Private commands and admission handlers finish before the final offset write.
+		// Their durable invitation flags remain available if persistence requires another poll.
 		offset = update.ID + 1
 		if err := plugin.save(ctx, plugin.scoped("offset"), offset); err != nil {
 			return err

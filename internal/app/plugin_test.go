@@ -38,22 +38,26 @@ import (
 
 // fixture connects one plugin to isolated storage and controllable remote APIs.
 type fixture struct {
-	t                *testing.T
-	host             *plugintest.Harness
-	plugin           *Plugin
-	server           *httptest.Server
-	clock            time.Time
-	linux            bool
-	orders           []*pluginpb.Order
-	catalog          []byte
-	catalogError     bool
-	updates          []Update
-	calls            map[string]int
-	fail             string
-	failStatus       int              // injected failure status
+	t            *testing.T
+	host         *plugintest.Harness
+	plugin       *Plugin
+	server       *httptest.Server
+	clock        time.Time
+	linux        bool
+	orders       []*pluginpb.Order
+	catalog      []byte
+	catalogError bool
+	updates      []Update
+	calls        map[string]int
+	fail         string
+	failStatus   int // injected failure status
+	// failCall selects one invocation of fail; zero applies the injected failure
+	// to every invocation so existing persistent-outage scenarios keep their scope.
+	failCall         int              // failing method invocation number
 	loseApproval     bool             // drop successful approval response
 	admitted         []int64          // users admitted by fixture
 	messages         []map[string]any // captured outgoing bot messages
+	menus            []map[string]any // captured command menu requests
 	approvalFinished chan struct{}    // dropped response handler completion
 	modelBody        map[string]any
 	groupType        string
@@ -139,7 +143,7 @@ func (f *fixture) restart() {
 func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 	method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
 	f.calls[method]++
-	if method == f.fail {
+	if method == f.fail && (f.failCall == 0 || f.calls[method] == f.failCall) {
 		status := f.failStatus
 		if status == 0 {
 			status = http.StatusInternalServerError
@@ -161,6 +165,12 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 		result = map[string]any{"type": kind, "username": f.groupName, "join_by_request": f.joinByRequest}
 	case "getChatMember":
 		result = map[string]any{"status": "administrator", "can_invite_users": true}
+	case "setMyCommands":
+		var input map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			f.t.Error(err)
+		}
+		f.menus = append(f.menus, input)
 	case "createChatInviteLink":
 		var input map[string]any
 		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
