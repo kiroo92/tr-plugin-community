@@ -12,8 +12,8 @@ import (
 	"github.com/TokenFlux/TokenRouter/plugin-sdk/go/sdk"
 )
 
-// http.go exposes authenticated community status, invitation claims, and
-// administrator controls through the plugin's declared routes. Host caller
+// http.go registers community status, invitation claims, administrator controls,
+// and the independently authenticated binding lookup. Host caller
 // metadata determines user and administrator access. Responses reveal permanent
 // bot entry URLs to eligible claimants. Start tokens are removed from serialized
 // records, and administrator lists omit both group URLs and bot entry tokens.
@@ -27,8 +27,13 @@ import (
 func problem(writer http.ResponseWriter, status int, err error) {
 	sdk.WriteJSON(writer, status, map[string]string{"message": err.Error()})
 }
+
+// Handler registers the plugin's manifest-declared community and administrator routes.
+// Website routes enforce SDK caller authentication through serve, while the
+// public binding route delegates its dedicated secret authentication to serveBinding.
 func (plugin *Plugin) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /binding", plugin.serveBinding)
 	for _, route := range []string{"GET /status", "POST /invite", "GET /image", "GET /admin/status", "GET /admin/invites", "POST /admin/settings", "POST /admin/check", "POST /admin/revoke", "POST /admin/clear", "POST /admin/refresh", "POST /admin/send"} {
 		mux.HandleFunc(route, plugin.serve)
 	}
