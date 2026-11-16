@@ -19,14 +19,15 @@ import (
 //
 // Response parsing distinguishes a validated client rejection from an uncertain
 // transport or server outcome. Admission uses that distinction to decide whether
-// a consumed claim may be released. Polling retries persisted revocations before
-// handling further updates, while offsets retain progress across process restarts
+// a consumed claim may be released. Polling retries persisted invitation and photo
+// cleanup before handling further updates, while offsets retain progress across process restarts
 // and prevent replay of assistant requests whose external effects are uncertain.
 
 // telegramRejection identifies a validated Bot API refusal of a request.
 type telegramRejection struct {
-	method string // rejected API method
-	code   int    // Telegram HTTP status
+	method      string // rejected API method
+	code        int    // Telegram HTTP status
+	description string // validated refusal description
 }
 
 // Bot holds the verified bot identity used for message routing.
@@ -151,10 +152,11 @@ func (plugin *Plugin) telegramResult(ctx context.Context, method string, respons
 		return errors.New("Telegram 响应无效或过大")
 	}
 	var result struct {
-		OK         bool            `json:"ok"`
-		Result     json.RawMessage `json:"result"`
-		Code       int             `json:"error_code"`
-		Parameters struct {
+		OK          bool            `json:"ok"`
+		Result      json.RawMessage `json:"result"`
+		Code        int             `json:"error_code"`
+		Description string          `json:"description"` // validated failure description
+		Parameters  struct {
 			Retry int64 `json:"retry_after"`
 		} `json:"parameters"`
 	}
@@ -170,7 +172,7 @@ func (plugin *Plugin) telegramResult(ctx context.Context, method string, respons
 			}
 		}
 		if !result.OK && result.Code == response.StatusCode && result.Code >= 400 && result.Code < 500 {
-			return &telegramRejection{method: method, code: result.Code}
+			return &telegramRejection{method: method, code: result.Code, description: result.Description}
 		}
 		return fmt.Errorf("Telegram %s 失败（%d），检查机器人权限或稍后重试", method, response.StatusCode)
 	}
@@ -247,7 +249,7 @@ func (plugin *Plugin) checkBot(ctx context.Context) error {
 // poll processes one batch of Telegram updates for the configured group.
 // The caller holds plugin.mu so admission, HTTP claims, and offset writes run
 // in one sequence. Bot permissions are refreshed periodically and persisted
-// revocations are retried before accepting another batch.
+// invitation revocations and superseded photos are retried before accepting a batch.
 //
 // Private commands retry uncertain failures after their handlers persist binding
 // and invitation changes. Commands are routed before assistant triggers, and membership
@@ -270,6 +272,13 @@ func (plugin *Plugin) poll(ctx context.Context) error {
 	}
 	if err := plugin.retryRevokes(ctx); err != nil {
 		return err
+	}
+	if err := plugin.retryChannelCleanup(ctx); err != nil {
+		// Retain failed cleanup and continue the polling path. Telegram's shared request
+		// cooldown still applies when deletion fails because of a Bot API rate limit.
+		if eventErr := plugin.event(ctx, "删除旧状态图失败", err.Error()); eventErr != nil {
+			return eventErr
+		}
 	}
 	var offset int64
 	if _, err := plugin.load(ctx, plugin.scoped("offset"), &offset); err != nil {

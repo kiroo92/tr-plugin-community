@@ -73,8 +73,12 @@ func (plugin *Plugin) loadPoolCounts(ctx context.Context, state *ChannelState) {
 			Available *int64 `json:"available_accounts"` // measured active accounts
 		} `json:"group_stats"`
 	}
-	if err != nil || response.StatusCode != http.StatusOK || len(raw) > 256<<10 || json.Unmarshal(raw, &result) != nil || result.Groups == nil {
-		state.PoolError = "透明号池统计返回无效或尚未开启公开统计"
+	if response.StatusCode != http.StatusOK {
+		state.PoolError = poolResponseError(response.StatusCode, raw)
+		return
+	}
+	if err != nil || len(raw) > 256<<10 || json.Unmarshal(raw, &result) != nil || result.Groups == nil {
+		state.PoolError = "透明号池统计响应格式无效，请检查统计地址"
 		return
 	}
 	// Allow a minute of clock skew between independently hosted source services.
@@ -102,6 +106,28 @@ func (plugin *Plugin) loadPoolCounts(ctx context.Context, state *ChannelState) {
 	// Pool collection normally refreshes once per minute. Older observations remain
 	// visible with a stale label instead of being presented as newly collected counts.
 	state.PoolStale = result.Stale || plugin.now().Sub(snapshot) > 5*time.Minute
+}
+
+// poolResponseError translates known export failures into actionable source diagnostics.
+// Unknown upstream text stays out of the caption because the configured URL
+// could return an unrelated page containing private or untrusted diagnostic content.
+func poolResponseError(status int, raw []byte) string {
+	var failure struct {
+		Message string `json:"message"` // source error category
+	}
+	// Only a recognized error category changes the instruction. Malformed bodies retain
+	// the status-based diagnostic, keeping arbitrary upstream text out of group messages.
+	_ = json.Unmarshal(raw, &failure)
+	if status == http.StatusNotFound && failure.Message == "公开号池统计未启用" {
+		return "请在透明号池的插件原生配置中开启「公开分组的可用账号统计」并保存"
+	}
+	if status == http.StatusNotFound {
+		return "透明号池统计接口不存在，请核对统计地址及插件版本"
+	}
+	if status == http.StatusServiceUnavailable {
+		return "透明号池统计暂不可用，请检查号池同步状态及完整快照"
+	}
+	return "透明号池统计请求失败（HTTP " + strconv.Itoa(status) + "）"
 }
 
 // channelCaption appends available counts for the requested GPT pools after the

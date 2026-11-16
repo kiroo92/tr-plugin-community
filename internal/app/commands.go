@@ -70,7 +70,7 @@ func commandsFor(chatType string) []botCommand {
 		return []botCommand{
 			{"start", "绑定网站账号或继续领取群邀请"},
 			{"help", "查看命令和使用说明"},
-			{"id", "查看 Telegram ID"},
+			{"id", "查看绑定的网站用户 ID"},
 			{"status", "查看本人的绑定与入群资格"},
 			{"invite", "重新发送本人的群邀请"},
 			{"reset", "清除本人的 AI 对话上下文"},
@@ -78,7 +78,7 @@ func commandsFor(chatType string) []botCommand {
 	}
 	return []botCommand{
 		{"help", "查看命令和使用说明"},
-		{"id", "查看自己或回复对象的 Telegram ID"},
+		{"id", "查看自己或回复对象的网站用户 ID"},
 		{"status", "查看社群功能运行状态"},
 		{"channels", "更新群内公开渠道状态图"},
 		{"reset", "清除本人的 AI 对话上下文"},
@@ -92,7 +92,8 @@ func commandsFor(chatType string) []botCommand {
 //
 // A bot suffix is checked against the saved username. Private Start and invite
 // commands normalize their spelling before delegating to the durable onboarding
-// handler; reply targets never select another user's binding or AI history.
+// handler; reply targets select a website identity for /id, while account operations and
+// AI history changes continue using the requesting sender.
 func (plugin *Plugin) handleCommand(ctx context.Context, message *Message) (bool, error) {
 	parts := strings.Fields(message.Text)
 	if len(parts) == 0 || !strings.HasPrefix(parts[0], "/") {
@@ -129,7 +130,7 @@ func (plugin *Plugin) handleCommand(ctx context.Context, message *Message) (bool
 		for _, command := range commandsFor(message.Chat.Type) {
 			fmt.Fprintf(&text, "/%s：%s\n", command.Command, command.Description)
 		}
-		text.WriteString("\n在群里回复某人的消息，再发送 /id，即可查询对方的 Telegram ID。也支持 /id@机器人用户名。")
+		text.WriteString("\n在群里回复某人的消息，再发送 /id，即可查询对方绑定的网站用户 ID。也支持 /id@机器人用户名。")
 		if message.Chat.Type == "private" {
 			text.WriteString("\n首次绑定请从网站的专属机器人链接点击 Start。入口和群邀请长期有效，入群后群邀请撤销。")
 		} else {
@@ -141,15 +142,21 @@ func (plugin *Plugin) handleCommand(ctx context.Context, message *Message) (bool
 		if message.Reply != nil {
 			target = message.Reply
 		}
-		text := "Telegram 未提供这条消息的发送者 ID。"
+		text := "Telegram 未提供该消息的发送者，无法查询绑定的网站用户 ID。"
 		if target.SenderChat != nil {
-			// Telegram supplies a synthetic From for anonymous chat senders. Prefer
-			// sender_chat so that synthetic identifier cannot be mistaken for a person's ID.
-			text = fmt.Sprintf("发送方聊天 ID：%d\n该消息以群组或频道身份发送，Telegram 未提供个人用户 ID。", target.SenderChat.ID)
+			// Chat senders can carry Telegram's synthetic anonymous user identity. That
+			// identity cannot establish ownership of a person's bound website account.
+			text = "该消息以群组或频道身份发送，无法查询绑定的网站用户 ID。"
 		} else if target.From.ID > 0 {
-			text = fmt.Sprintf("Telegram 用户 ID：%d", target.From.ID)
+			current, found, err := plugin.inviteForTelegram(ctx, target.From.ID)
+			if err != nil {
+				return true, err
+			}
+			text = "该用户尚未绑定网站账号。"
+			if found {
+				text = fmt.Sprintf("网站用户 ID：%d", current.UserID)
+			}
 		}
-		text += fmt.Sprintf("\n当前聊天 ID：%d", message.Chat.ID)
 		return true, plugin.commandReply(ctx, message, text)
 	case "status":
 		return true, plugin.commandStatus(ctx, message)
@@ -223,7 +230,7 @@ func (plugin *Plugin) commandStatus(ctx context.Context, message *Message) error
 
 // commandReply sends plain command output back to the originating chat.
 // Replies retain their message and forum topic when supplied by Telegram, so
-// group ID queries remain beside the command that requested them.
+// website ID queries remain beside the command that requested them.
 func (plugin *Plugin) commandReply(ctx context.Context, message *Message, text string) error {
 	input := map[string]any{"chat_id": message.Chat.ID, "text": text}
 	if message.ID > 0 {

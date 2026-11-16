@@ -9,11 +9,19 @@ import (
 )
 
 // TestIDCommandReplies exercises real polling with self, reply, and anonymous
-// sender queries. Replies identify the selected user, keep their forum topic,
+// sender queries. Replies identify the bound website account, keep their forum topic,
 // and continue working when invitation and AI features are disabled.
 func TestIDCommandReplies(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
+	for _, binding := range []struct {
+		telegram int64 // Telegram sender identifier
+		website  int64 // bound website identifier
+	}{{777, 9}, {4503599627370495, 42}, {888, 43}, {889, 44}} {
+		if err := f.plugin.save(ctx, f.plugin.inviteKey(binding.website), Invite{UserID: binding.website, TelegramID: binding.telegram}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for index, scenario := range []struct {
 		name   string   // identity query scenario
 		reply  *Message // optional replied message
@@ -21,13 +29,14 @@ func TestIDCommandReplies(t *testing.T) {
 		want   string   // expected identity response
 		absent string   // forbidden synthetic user identity
 	}{
-		{name: "self", text: "/id", want: "Telegram 用户 ID：777"},
-		{name: "reply", text: "/id", reply: &Message{From: TGUser{ID: 4503599627370495}}, want: "Telegram 用户 ID：4503599627370495", absent: "用户 ID：777"},
-		{name: "addressed", text: "/id@TestBot", reply: &Message{From: TGUser{ID: 888}}, want: "Telegram 用户 ID：888"},
-		{name: "username case", text: "/id@tEsTbOt", reply: &Message{From: TGUser{ID: 889}}, want: "Telegram 用户 ID：889"},
-		{name: "anonymous", text: "/id", reply: &Message{From: TGUser{ID: 1087968824}, SenderChat: &TGChat{ID: -100888, Type: "supergroup"}}, want: "发送方聊天 ID：-100888", absent: "1087968824"},
-		{name: "channel", text: "/id", reply: &Message{SenderChat: &TGChat{ID: -100889, Type: "channel"}}, want: "发送方聊天 ID：-100889"},
-		{name: "sender unavailable", text: "/id", reply: &Message{}, want: "未提供这条消息的发送者 ID"},
+		{name: "self", text: "/id", want: "网站用户 ID：9"},
+		{name: "reply", text: "/id", reply: &Message{From: TGUser{ID: 4503599627370495}}, want: "网站用户 ID：42", absent: "网站用户 ID：9"},
+		{name: "addressed", text: "/id@TestBot", reply: &Message{From: TGUser{ID: 888}}, want: "网站用户 ID：43"},
+		{name: "username case", text: "/id@tEsTbOt", reply: &Message{From: TGUser{ID: 889}}, want: "网站用户 ID：44"},
+		{name: "anonymous", text: "/id", reply: &Message{From: TGUser{ID: 1087968824}, SenderChat: &TGChat{ID: -100888, Type: "supergroup"}}, want: "无法查询绑定的网站用户 ID", absent: "1087968824"},
+		{name: "channel", text: "/id", reply: &Message{SenderChat: &TGChat{ID: -100889, Type: "channel"}}, want: "无法查询绑定的网站用户 ID"},
+		{name: "unbound", text: "/id", reply: &Message{From: TGUser{ID: 990}}, want: "尚未绑定网站账号"},
+		{name: "sender unavailable", text: "/id", reply: &Message{}, want: "未提供该消息的发送者"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			message := &Message{
@@ -48,7 +57,7 @@ func TestIDCommandReplies(t *testing.T) {
 			}
 			got := f.messages[index]
 			text := got["text"].(string)
-			if !strings.Contains(text, scenario.want) || !strings.Contains(text, "当前聊天 ID：-100123456") || scenario.absent != "" && strings.Contains(text, scenario.absent) {
+			if !strings.Contains(text, scenario.want) || strings.Contains(text, "Telegram 用户 ID：") || strings.Contains(text, "当前聊天 ID：") || scenario.absent != "" && strings.Contains(text, scenario.absent) {
 				t.Fatalf("wrong ID response: %s", text)
 			}
 			parameters, ok := got["reply_parameters"].(map[string]any)

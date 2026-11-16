@@ -38,19 +38,22 @@ import (
 
 // fixture connects one plugin to isolated storage and controllable remote APIs.
 type fixture struct {
-	t            *testing.T
-	host         *plugintest.Harness
-	plugin       *Plugin
-	server       *httptest.Server
-	clock        time.Time
-	linux        bool
-	orders       []*pluginpb.Order
-	catalog      []byte
-	catalogError bool
-	updates      []Update
-	calls        map[string]int
-	fail         string
-	failStatus   int // injected failure status
+	t               *testing.T
+	host            *plugintest.Harness
+	plugin          *Plugin
+	server          *httptest.Server
+	clock           time.Time
+	linux           bool
+	orders          []*pluginpb.Order
+	catalog         []byte
+	catalogError    bool
+	updates         []Update
+	calls           map[string]int
+	fail            string
+	failStatus      int      // injected failure status
+	failDescription string   // injected refusal description
+	operations      []string // ordered Telegram methods
+	deleted         []int64  // deleted photo identifiers
 	// failCall selects one invocation of fail; zero applies the injected failure
 	// to every invocation so existing persistent-outage scenarios keep their scope.
 	failCall         int              // failing method invocation number
@@ -143,12 +146,13 @@ func (f *fixture) restart() {
 func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 	method := request.URL.Path[strings.LastIndex(request.URL.Path, "/")+1:]
 	f.calls[method]++
+	f.operations = append(f.operations, method)
 	if method == f.fail && (f.failCall == 0 || f.calls[method] == f.failCall) {
 		status := f.failStatus
 		if status == 0 {
 			status = http.StatusInternalServerError
 		}
-		sdk.WriteJSON(writer, status, map[string]any{"ok": false, "error_code": status})
+		sdk.WriteJSON(writer, status, map[string]any{"ok": false, "error_code": status, "description": f.failDescription})
 		return
 	}
 	var result any = true
@@ -223,6 +227,18 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 			f.t.Error(err)
 		}
 		f.messages = append(f.messages, input)
+	case "deleteMessage":
+		var input struct {
+			Chat string `json:"chat_id"`    // target group identifier
+			ID   int64  `json:"message_id"` // superseded photo identifier
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			f.t.Error(err)
+		}
+		if input.Chat != f.plugin.chat || input.ID <= 0 {
+			f.t.Error("invalid deletion identity")
+		}
+		f.deleted = append(f.deleted, input.ID)
 	case "sendPhoto", "editMessageMedia":
 		if err := request.ParseMultipartForm(1 << 20); err != nil {
 			f.t.Error(err)
@@ -236,7 +252,8 @@ func (f *fixture) remote(writer http.ResponseWriter, request *http.Request) {
 				f.t.Error("not PNG", err)
 			}
 		}
-		result = map[string]int64{"message_id": 456}
+		// Distinct photo identifiers expose accidental reuse or deletion of the replacement.
+		result = map[string]int64{"message_id": 455 + int64(f.calls["sendPhoto"])}
 	case "completions":
 		if request.Header.Get("Authorization") != "Bearer fake-model-key" {
 			f.t.Error("model authorization")
@@ -768,6 +785,9 @@ func TestAITriggersLimitsAndClear(t *testing.T) {
 	}
 }
 
+// TestChannelPNGFailureAndCooldown checks bounded PNG previews and group cooldowns.
+// Successful refreshes replace the previous photo, while a catalog failure keeps
+// the last successful data available for authenticated website previews.
 func TestChannelPNGFailureAndCooldown(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()
@@ -795,8 +815,8 @@ func TestChannelPNGFailureAndCooldown(t *testing.T) {
 	if err := f.plugin.broadcast(ctx, true); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["sendPhoto"] != 1 || f.calls["editMessageMedia"] != 1 {
-		t.Fatal("must update original photo")
+	if f.calls["sendPhoto"] != 2 || f.calls["editMessageMedia"] != 0 || len(f.deleted) != 1 || f.deleted[0] != 456 {
+		t.Fatal("must send a new photo and delete the previous one")
 	}
 	f.catalogError = true
 	failed, err := f.plugin.refreshChannels(ctx)
